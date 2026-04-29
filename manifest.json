@@ -1,0 +1,31 @@
+{
+  "domain": "withings2garmin",
+  "name": "Withings to Garmin Sync",
+  "version": "0.1.0",
+  "documentation": "https://github.com/leaskovski/withings2garmin",
+  "issue_tracker": "https://github.com/leaskovski/withings2garmin/issues",
+  "requirements": [
+    "garminconnect>=0.3.2",
+    "requests>=2.28.0",
+    "aiohttp"
+  ],
+  "codeowners": ["@leaskovski"],
+  "dependencies": [],
+  "config_flow": true,
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "services": {
+    "sync": {
+      "name": "Sync Data",
+      "description": "Sync data from Withings to Garmin",
+      "fields": {
+        "features": {
+          "name": "Features",
+          "description": "Features to sync (WEIGHT, BLOOD_PRESSURE)",
+          "required": false,
+          "example": "WEIGHT,BLOOD_PRESSURE"
+        }
+      }
+    }
+  }
+}

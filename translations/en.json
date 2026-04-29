@@ -1,0 +1,62 @@
+{
+  "title": "Withings to Garmin Sync",
+  "flow_title": "Withings to Garmin Sync",
+  "step": {
+    "user": {
+      "title": "Configure Account",
+      "description": "Choose which account to configure first.",
+      "menu_options": {
+        "configure_withings": "Configure Withings",
+        "configure_garmin": "Configure Garmin"
+      }
+    },
+    "configure_withings": {
+      "title": "Withings Credentials",
+      "description": "Enter your Withings OAuth credentials. You can use the default values or register your own app at Withings.",
+      "data": {
+        "client_id": "Client ID",
+        "client_secret": "Client Secret"
+      }
+    },
+    "withings_authorize": {
+      "title": "Authorize Withings",
+      "description": "Click the link below to authorize Withings access. After logging in, you will be redirected to a page showing an authorization code. Copy that code and paste it here.",
+      "data": {
+        "code": "Authorization Code"
+      },
+      "description_with_code": "After authorizing, you will see a code on the redirect page. Enter it below.",
+      "open_link": "Authorize Withings"
+    },
+    "configure_garmin": {
+      "title": "Garmin Credentials",
+      "description": "Enter your Garmin Connect credentials.",
+      "data": {
+        "username": "Username",
+        "password": "Password"
+      }
+    },
+    "garmin_mfa": {
+      "title": "Garmin MFA",
+      "description": "Enter the MFA code from your authenticator app for {username}.",
+      "data": {
+        "mfa_code": "MFA Code"
+      }
+    }
+  },
+  "error": {
+    "withings_config_error": "Error configuring Withings",
+    "no_code_provided": "No authorization code provided",
+    "token_exchange_error": "Failed to exchange authorization code for tokens",
+    "withings_auth_error": "Withings authentication failed",
+    "garmin_login_error": "Failed to login to Garmin",
+    "garmin_mfa_error": "Invalid MFA code"
+  },
+  "abort": {
+    "no_code_provided": "No authorization code was provided",
+    "withings_auth_error": "Withings authentication failed"
+  },
+  "data": {
+    "withings_tokens": "Withings Tokens",
+    "garmin_username": "Garmin Username"
+  }
+}
