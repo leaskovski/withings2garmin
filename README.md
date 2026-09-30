@@ -19,7 +19,7 @@ A Home Assistant integration that syncs health data from Withings to Garmin Conn
 5. Click Install
 
 ### Manual Installation
-1. Copy the `withings_garmin` folder to your Home Assistant's `custom_components` folder
+1. Copy the `withings2garmin` folder to your Home Assistant's `custom_components` folder
 2. Restart Home Assistant
 
 ## Configuration
@@ -45,7 +45,7 @@ A Home Assistant integration that syncs health data from Withings to Garmin Conn
 ### Trigger a Manual Sync
 
 ```yaml
-service: withings_garmin.sync
+service: withings2garmin.sync
 data:
   features: "WEIGHT"
 ```
@@ -53,7 +53,7 @@ data:
 ### Sync with Blood Pressure
 
 ```yaml
-service: withings_garmin.sync
+service: withings2garmin.sync
 data:
   features: "WEIGHT,BLOOD_PRESSURE"
 ```
@@ -66,14 +66,14 @@ automation:
       - platform: time
         at: "08:00:00"
     action:
-      - service: withings_garmin.sync
+      - service: withings2garmin.sync
         data:
           features: "WEIGHT"
 ```
 
 ## Services
 
-### withings_garmin.sync
+### withings2garmin.sync
 
 Syncs data from Withings to Garmin.
 
@@ -97,7 +97,7 @@ Syncs data from Withings to Garmin.
 ### Garmin MFA Issues
 If you cannot complete MFA through the config flow:
 1. Use the python-garminconnect library locally to generate tokens
-2. Copy the token file to your HA config directory: `.withings_garmin_<entry_id>/garmin_session.json`
+2. Copy the token file to your HA config directory: `.withings2garmin_<entry_id>/garmin_session.json`
 
 ### No Data Synced
 - Ensure your Withings account has measurements
@@ -115,7 +115,7 @@ If you cannot complete MFA through the config flow:
 
 ### File Structure
 ```
-withings_garmin/
+withings2garmin/
 ├── __init__.py           # Integration entry point
 ├── manifest.json         # HA manifest
 ├── config_flow.py        # Config flow with MFA

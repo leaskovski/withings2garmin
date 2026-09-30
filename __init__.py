@@ -21,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Setting up Withings to Garmin Sync integration")
 
     # Create config directory for this entry
-    config_dir = hass.config.path(f".withings_garmin_{entry.entry_id}")
+    config_dir = hass.config.path(f".withings2garmin_{entry.entry_id}")
     os.makedirs(config_dir, exist_ok=True)
 
     # Store config entry data
