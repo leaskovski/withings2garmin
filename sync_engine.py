@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -188,26 +188,91 @@ class WithingsGarminSync:
         with open(withings_token_path, "w") as f:
             json.dump(self.withings_tokens, f)
 
+    @staticmethod
+    def _to_garmin_timestamp(timestamp: Any) -> str:
+        """Convert Withings timestamps into a Garmin-compatible ISO timestamp."""
+        if timestamp is None:
+            return datetime.now(timezone.utc).isoformat()
+
+        if isinstance(timestamp, (int, float)):
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+        if isinstance(timestamp, str):
+            try:
+                parsed = datetime.fromisoformat(timestamp)
+            except ValueError:
+                try:
+                    return datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+                except ValueError:
+                    return datetime.now(timezone.utc).isoformat()
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.isoformat()
+
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _normalize_percentage(value: Any) -> float | None:
+        """Normalize Withings percentage values for Garmin, handling either 25 or 2500 style inputs."""
+        if value is None:
+            return None
+
+        numeric = float(value)
+        return numeric / 100.0 if numeric > 100 else numeric
+
+    @staticmethod
+    def _normalize_mass_kg(value: Any) -> float | None:
+        """Normalize Withings mass values from grams to kg when the raw value is stored in grams."""
+        if value is None:
+            return None
+
+        numeric = float(value)
+        return numeric / 1000.0 if numeric > 100 else numeric
+
     async def _upload_weight_data(self, measurements: list[dict]) -> int:
-        """Upload weight data to Garmin."""
+        """Upload weight and body composition data to Garmin using the original Withings timestamp."""
         if not self.garmin:
             raise Exception("Garmin not configured")
 
         count = 0
         for measurement in measurements:
-            if "weight" in measurement.get("measures", {}):
-                # Create a FIT file for this weight measurement
-                # This is a simplified version - full implementation would use fit module
-                weight = measurement["measures"]["weight"] / 1000  # Convert to kg
+            measures = measurement.get("measures", {})
+            if "weight" not in measures:
+                continue
 
-                try:
-                    # Upload weight to Garmin
-                    # Note: Garmin Connect API has limited support for direct weight uploads
-                    # This may require using the activity upload endpoint
-                    _LOGGER.info("Would upload weight: %s kg", weight)
-                    count += 1
-                except Exception as e:
-                    _LOGGER.error("Error uploading weight: %s", e)
+            timestamp = self._to_garmin_timestamp(measurement.get("timestamp"))
+            weight_kg = self._normalize_mass_kg(measures["weight"])
+
+            percent_fat = None
+            if "fat_ratio" in measures:
+                percent_fat = self._normalize_percentage(measures["fat_ratio"])
+
+            percent_hydration = None
+            if "hydration" in measures:
+                percent_hydration = self._normalize_percentage(measures["hydration"])
+
+            bone_mass_kg = None
+            if "bone_mass" in measures:
+                bone_mass_kg = self._normalize_mass_kg(measures["bone_mass"])
+
+            muscle_mass_kg = None
+            if "muscle_mass" in measures:
+                muscle_mass_kg = self._normalize_mass_kg(measures["muscle_mass"])
+
+            try:
+                self.garmin.add_body_composition(
+                    timestamp=timestamp,
+                    weight=weight_kg,
+                    percent_fat=percent_fat,
+                    percent_hydration=percent_hydration,
+                    bone_mass=bone_mass_kg,
+                    muscle_mass=muscle_mass_kg,
+                )
+                count += 1
+                _LOGGER.info("Uploaded weight data to Garmin at %s: %.2f kg", timestamp, weight_kg)
+            except Exception as e:
+                _LOGGER.error("Error uploading weight data at %s: %s", timestamp, e)
 
         return count
 
