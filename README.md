@@ -1,127 +1,110 @@
+***NOTE! Whilst I can code, I decided to use AI to do all this component, so if you don't like AI Slop, then this component isn't for you***
+
 # Withings to Garmin Sync - Home Assistant Integration
 
-A Home Assistant integration that syncs health data from Withings to Garmin Connect.
+A Home Assistant custom integration that copies measurements from Withings to Garmin Connect.
 
 ## Features
 
-- **Withings OAuth2 Authentication** - Connect your Withings account
-- **Garmin Authentication** - Connect your Garmin Connect account (supports MFA)
-- **Manual Sync Service** - Trigger syncs via Home Assistant service
-- **Background Sync** - Run syncs in background without blocking HA
+- Uploads weigh-ins with body composition to Garmin: weight, body fat %, muscle mass, bone mass, hydration % and visceral fat.
+- Can also upload blood pressure readings (systolic, diastolic and pulse).
+- Syncs automatically on a configurable interval, or on demand with the `withings2garmin.sync` service.
+- Syncs incrementally. Only measurements created or edited since the last successful upload are sent. A failed upload is retried on the next sync, not skipped.
+- Supports Garmin multi-factor authentication. Your Garmin password is used once to log in and is never stored.
+- Refreshes Withings and Garmin tokens automatically. If a token is revoked, Home Assistant asks you to re-authenticate.
+
+## Requirements
+
+- Home Assistant 2024.11 or newer.
+- A Withings developer application, which is free (see below).
+- A Garmin Connect account.
 
 ## Installation
 
-### Via HACS (Recommended)
-1. Open Home Assistant
-2. Go to HACS > Integrations
-3. Click the "+" button
-4. Search for "Withings to Garmin Sync"
-5. Click Install
+### HACS
+1. HACS → Integrations → ⋮ → Custom repositories → add this repository as an *Integration*.
+2. Install **Withings to Garmin Sync** and restart Home Assistant.
 
-### Manual Installation
-1. Copy the `withings2garmin` folder to your Home Assistant's `custom_components` folder
-2. Restart Home Assistant
+### Manual
+Copy `custom_components/withings2garmin` into your Home Assistant `config/custom_components/` folder and restart.
 
 ## Configuration
 
-### Step 1: Add Integration
-1. Go to Settings > Devices & Services
-2. Click "Add Integration"
-3. Search for "Withings to Garmin Sync"
-4. Follow the configuration steps
+### 1. Create a Withings developer app
+1. Sign in at <https://developer.withings.com/dashboard/> and create an application (*Public API integration*).
+2. Set a **Callback URL**. It must match exactly what you enter in Home Assistant, but it doesn't need to serve a page. For example, use your Home Assistant URL (`https://homeassistant.local:8123/`).
+3. Note the **Client ID** and **Client Secret**.
 
-### Step 2: Configure Withings
-1. Enter your Withings OAuth credentials (or use defaults)
-2. You will be redirected to Withings to authorize access
-3. After authorization, you will be returned to HA
+### 2. Add the integration
+Settings → Devices & Services → Add Integration → **Withings to Garmin Sync**.
 
-### Step 3: Configure Garmin
-1. Enter your Garmin Connect username and password
-2. If MFA is required, enter the code from your authenticator app
-3. The integration will save your credentials securely
+1. Enter the Withings Client ID, Client Secret and Callback URL.
+2. Click the authorization link and grant access. Your browser is redirected to `<callback>?code=...&state=...`. Copy the **whole address** from the address bar and paste it into the form. Withings codes expire after about **30 seconds**, so do this quickly. If the code expires, click the link again.
+3. Enter your Garmin Connect email and password, then the verification code if Garmin asks for one.
 
-## Usage
+### 3. Options
+Click **Configure** on the integration to set:
+- **Automatic sync interval** in minutes. The default is 60; use `0` to sync only via the service.
+- **Data to sync**: `WEIGHT` and/or `BLOOD_PRESSURE`.
 
-### Trigger a Manual Sync
+The first sync uploads the last 7 days of measurements.
+
+## Service: `withings2garmin.sync`
+
+| Field | Description |
+|---|---|
+| `config_entry_id` | Optional. Sync only this entry; by default every entry is synced. |
+| `features` | Optional. A list (or comma-separated string) of `WEIGHT` and `BLOOD_PRESSURE`. Defaults to the options you set. |
+
+The service returns a response with the number of records synced. If the sync fails, it raises an error.
 
 ```yaml
-service: withings2garmin.sync
+action: withings2garmin.sync
 data:
-  features: "WEIGHT"
+  features:
+    - WEIGHT
+    - BLOOD_PRESSURE
+response_variable: sync_result
 ```
 
-### Sync with Blood Pressure
-
-```yaml
-service: withings2garmin.sync
-data:
-  features: "WEIGHT,BLOOD_PRESSURE"
-```
-
-### Use in Automations
+Example: sync shortly after a weigh-in, triggered by the core Withings integration's weight sensor:
 
 ```yaml
 automation:
-  - trigger:
-      - platform: time
-        at: "08:00:00"
-    action:
-      - service: withings2garmin.sync
-        data:
-          features: "WEIGHT"
+  - alias: Push new weigh-ins to Garmin
+    triggers:
+      - trigger: state
+        entity_id: sensor.withings_weight
+    actions:
+      - delay: "00:01:00"
+      - action: withings2garmin.sync
 ```
 
-## Services
+## Data mapping
 
-### withings2garmin.sync
-
-Syncs data from Withings to Garmin.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| features | string | Features to sync: WEIGHT, BLOOD_PRESSURE (comma-separated) |
-
-## Supported Data
-
-| Withings Data | Garmin Data |
-|---------------|-------------|
-| Weight | Weight (via activity upload) |
-| Body Fat % | Body composition |
-| Muscle Mass | Body composition |
-| Bone Mass | Body composition |
-| Hydration | Body composition |
-| Blood Pressure | Blood pressure (via activity upload) |
+| Withings (meastype) | Garmin |
+|---|---|
+| Weight (1) | Weight |
+| Fat ratio (6) | Body fat % |
+| Muscle mass (76) | Muscle mass |
+| Hydration (77, kg) | Body water %, calculated as hydration ÷ weight |
+| Bone mass (88) | Bone mass |
+| Visceral fat (170) | Visceral fat rating |
+| Systolic / Diastolic / Pulse (10 / 9 / 11) | Blood pressure |
 
 ## Troubleshooting
 
-### Garmin MFA Issues
-If you cannot complete MFA through the config flow:
-1. Use the python-garminconnect library locally to generate tokens
-2. Copy the token file to your HA config directory: `.withings2garmin_<entry_id>/garmin_session.json`
-
-### No Data Synced
-- Ensure your Withings account has measurements
-- Check Home Assistant logs for errors
-- Verify credentials are correctly stored
+- Turn on debug logging for `custom_components.withings2garmin` to see each upload.
+- **Repeated Garmin login failures or rate limiting:** Garmin limits SSO logins. Wait before retrying.
+- **Measurements edited in Withings** count as modified, so they're uploaded again and will appear in Garmin as an extra entry.
 
 ## Development
 
-### Requirements
-- Python 3.11+
-- Home Assistant 2024.1+
-- garminconnect>=0.3.2
-- requests>=2.28.0
-- aiohttp
+The conversion logic in `measurements.py` has no Home Assistant dependency:
 
-### File Structure
-```
-withings2garmin/
-├── __init__.py           # Integration entry point
-├── manifest.json         # HA manifest
-├── config_flow.py        # Config flow with MFA
-├── const.py              # Constants
-├── sync_engine.py        # Sync logic
-└── README.md             # This file
+```bash
+pip install pytest
+pytest tests/
 ```
 
 ## License

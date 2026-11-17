@@ -1,315 +1,210 @@
 """Sync engine for Withings to Garmin."""
 
+from __future__ import annotations
+
 import asyncio
-import json
 import logging
-import os
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import timedelta
 from typing import Any
 
-import aiohttp
-import garminconnect
-from garminconnect import Garmin
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
+from . import garmin as garmin_api
 from .const import (
-    DEFAULT_WITHINGS_CALLBACK_URL,
-    DEFAULT_WITHINGS_CLIENT_ID,
-    DEFAULT_WITHINGS_CLIENT_SECRET,
+    CONF_GARMIN_TOKENS,
+    CONF_LAST_SYNC,
+    CONF_WITHINGS_TOKEN,
     FEATURE_BLOOD_PRESSURE,
     FEATURE_WEIGHT,
-    TOKEN_FILE_GARMIN,
-    TOKEN_FILE_WITHINGS,
-    WITHINGS_AUTHORIZE_URL,
-    WITHINGS_GETMEAS_URL,
-    WITHINGS_TOKEN_URL,
+    INITIAL_SYNC_DAYS,
 )
+from .measurements import (
+    BLOOD_PRESSURE_TYPES,
+    BODY_COMPOSITION_TYPES,
+    MeasureGroup,
+    parse_groups,
+    to_blood_pressure,
+    to_body_composition,
+)
+from .withings import WithingsAuthError, WithingsClient, WithingsError
 
 _LOGGER = logging.getLogger(__name__)
 
+# Refresh the Withings access token when it has less than this left (seconds)
+_TOKEN_REFRESH_MARGIN = 300
+
+
+class SyncAuthError(Exception):
+    """Credentials for one of the services are no longer valid."""
+
 
 class WithingsGarminSync:
-    """Handles syncing data from Withings to Garmin."""
+    """Syncs measurements from Withings to Garmin for one config entry."""
 
-    def __init__(self, hass, config_dir: str):
-        """Initialize the sync engine."""
+    def __init__(
+        self, hass: HomeAssistant, entry: ConfigEntry, withings: WithingsClient
+    ) -> None:
         self.hass = hass
-        self.config_dir = config_dir
-        self.withings_tokens: dict | None = None
-        self.garmin: Garmin | None = None
+        self.entry = entry
+        self.withings = withings
+        self._lock = asyncio.Lock()
 
-    async def sync(self, features: list[str] | None = None) -> dict:
-        """Run the sync from Withings to Garmin."""
-        if features is None:
-            features = [FEATURE_WEIGHT]
+    async def async_sync(self, features: list[str]) -> dict[str, Any]:
+        """Run a sync. Concurrent calls are serialized."""
+        async with self._lock:
+            result: dict[str, Any] = {
+                "success": False,
+                "message": "",
+                "synced_weight": 0,
+                "synced_blood_pressure": 0,
+            }
+            try:
+                await self._sync(features, result)
+            except SyncAuthError as err:
+                _LOGGER.error("Withings to Garmin sync needs re-authentication: %s", err)
+                result["message"] = str(err)
+                self.entry.async_start_reauth(self.hass)
+            except (WithingsError, garmin_api.GarminConnectConnectionError,
+                    garmin_api.GarminConnectTooManyRequestsError) as err:
+                _LOGGER.error("Withings to Garmin sync failed: %s", err)
+                result["message"] = str(err)
+            except Exception as err:  # noqa: BLE001 - never let a sync crash HA
+                _LOGGER.exception("Unexpected error during Withings to Garmin sync")
+                result["message"] = f"Unexpected error: {err}"
+            return result
 
-        result = {
-            "success": False,
-            "message": "",
-            "synced_weight": 0,
-            "synced_blood_pressure": 0,
-        }
+    async def _sync(self, features: list[str], result: dict[str, Any]) -> None:
+        sync_weight = FEATURE_WEIGHT in features
+        sync_bp = FEATURE_BLOOD_PRESSURE in features
+        if not (sync_weight or sync_bp):
+            result["success"] = True
+            result["message"] = "No features selected"
+            return
+
+        meastypes: list[int] = []
+        if sync_weight:
+            meastypes.extend(BODY_COMPOSITION_TYPES)
+        if sync_bp:
+            meastypes.extend(BLOOD_PRESSURE_TYPES)
+
+        access_token = await self._ensure_withings_token()
+
+        last_sync = self.entry.data.get(CONF_LAST_SYNC)
+        if last_sync is None:
+            lastupdate = int(
+                (dt_util.utcnow() - timedelta(days=INITIAL_SYNC_DAYS)).timestamp()
+            )
+        else:
+            # Withings returns groups modified at or after `lastupdate`; +1 avoids
+            # re-uploading the last group we already handled.
+            lastupdate = int(last_sync) + 1
 
         try:
-            # Load tokens
-            await self._load_tokens()
+            raw_groups = await self.withings.get_measure_groups(
+                access_token, lastupdate, meastypes
+            )
+        except WithingsAuthError as err:
+            raise SyncAuthError(f"Withings rejected the access token: {err}") from err
 
-            # Sync Withings data
-            withings_data = await self._fetch_withings_data()
-
-            if not withings_data:
-                result["message"] = "No new data to sync"
-                result["success"] = True
-                return result
-
-            # Upload to Garmin
-            if FEATURE_WEIGHT in features:
-                weight_count = await self._upload_weight_data(withings_data)
-                result["synced_weight"] = weight_count
-
-            if FEATURE_BLOOD_PRESSURE in features:
-                bp_count = await self._upload_blood_pressure_data(withings_data)
-                result["synced_blood_pressure"] = bp_count
-
+        groups = sorted(parse_groups(raw_groups), key=lambda g: (g.modified, g.date))
+        if not groups:
             result["success"] = True
-            result["message"] = f"Synced {result['synced_weight']} weight, {result['synced_blood_pressure']} blood pressure records"
-
-        except Exception as e:
-            _LOGGER.error("Sync error: %s", e)
-            result["message"] = str(e)
-
-        return result
-
-    async def _load_tokens(self) -> None:
-        """Load stored tokens from config directory."""
-        # Load Withings tokens
-        withings_token_path = os.path.join(self.config_dir, TOKEN_FILE_WITHINGS)
-        if os.path.exists(withings_token_path):
-            with open(withings_token_path, "r") as f:
-                self.withings_tokens = json.load(f)
-
-        # Load Garmin tokens
-        garmin_token_path = os.path.join(self.config_dir, TOKEN_FILE_GARMIN)
-        if os.path.exists(garmin_token_path):
-            with open(garmin_token_path, "r") as f:
-                garmin_tokens = json.load(f)
-                # Initialize Garmin client with stored tokens
-                self.garmin = Garmin(garmin_tokens)
-
-    async def _fetch_withings_data(self) -> list[dict]:
-        """Fetch measurements from Withings API."""
-        if not self.withings_tokens:
-            raise Exception("Withings not configured")
-
-        # Check if token needs refresh
-        await self._refresh_withings_token()
-
-        # Get last sync time
-        last_sync = self.withings_tokens.get("last_sync")
-        if last_sync:
-            fromdate = datetime.fromisoformat(last_sync)
-        else:
-            fromdate = datetime.now() - timedelta(days=7)
-
-        todate = datetime.now()
-
-        # Fetch measurements
-        headers = {
-            "Authorization": f"Bearer {self.withings_tokens.get('access_token')}",
-        }
-
-        params = {
-            "startdate": int(fromdate.timestamp()),
-            "enddate": int(todate.timestamp()),
-            "data_types": "weight, fat_ratio, muscle_mass, bone_mass, hydration",
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(WITHINGS_GETMEAS_URL, headers=headers, params=params) as response:
-                if response.status != 200:
-                    raise Exception(f"Withings API error: {response.status}")
-
-                data = await response.json()
-
-        # Parse measurements
-        measurements = []
-        if data.get("body", {}).get("measuregrps"):
-            for group in data["body"]["measuregrps"]:
-                timestamp = group.get("date")
-                measures = group.get("measures", [])
-
-                entry = {"timestamp": timestamp, "measures": {}}
-
-                for measure in measures:
-                    measure_type = measure.get("type")
-                    value = measure.get("value")
-
-                    # Map Withings measure types to names
-                    type_map = {
-                        1: "weight",
-                        5: "fat_ratio",
-                        6: "muscle_mass",
-                        8: "bone_mass",
-                        9: "hydration",
-                    }
-
-                    if measure_type in type_map:
-                        entry["measures"][type_map[measure_type]] = value
-
-                if entry["measures"]:
-                    measurements.append(entry)
-
-        # Update last sync time
-        self.withings_tokens["last_sync"] = todate.isoformat()
-        await self._save_withings_tokens()
-
-        return measurements
-
-    async def _refresh_withings_token(self) -> None:
-        """Refresh Withings access token if needed."""
-        # Check if token is expired (simplified check)
-        # In production, check token expiry time
-        if not self.withings_tokens:
+            result["message"] = "No new data to sync"
             return
 
-        # If we have a refresh token, use it
-        refresh_token = self.withings_tokens.get("refresh_token")
-        if not refresh_token:
-            return
+        client = await self._garmin_login()
 
-        # In production, implement token refresh logic
-        # For now, assume token is still valid
-
-    async def _save_withings_tokens(self) -> None:
-        """Save Withings tokens to config directory."""
-        if not self.withings_tokens:
-            return
-
-        withings_token_path = os.path.join(self.config_dir, TOKEN_FILE_WITHINGS)
-        with open(withings_token_path, "w") as f:
-            json.dump(self.withings_tokens, f)
-
-    @staticmethod
-    def _to_garmin_timestamp(timestamp: Any) -> str:
-        """Convert Withings timestamps into a Garmin-compatible ISO timestamp."""
-        if timestamp is None:
-            return datetime.now(timezone.utc).isoformat()
-
-        if isinstance(timestamp, (int, float)):
-            return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
-
-        if isinstance(timestamp, str):
-            try:
-                parsed = datetime.fromisoformat(timestamp)
-            except ValueError:
+        watermark: int | None = None
+        failure: str | None = None
+        try:
+            for group in groups:
                 try:
-                    return datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
-                except ValueError:
-                    return datetime.now(timezone.utc).isoformat()
+                    await self._upload_group(client, group, sync_weight, sync_bp, result)
+                except garmin_api.GarminConnectAuthenticationError as err:
+                    raise SyncAuthError(f"Garmin rejected the session: {err}") from err
+                except Exception as err:  # noqa: BLE001
+                    # Stop here so the failed group (and everything after it) is
+                    # retried next time instead of being silently skipped.
+                    failure = f"Upload of measurement {group.grpid} failed: {err}"
+                    _LOGGER.error(failure)
+                    break
+                watermark = group.modified
+        finally:
+            # Always record progress, even if we bail out with an auth error,
+            # so already-uploaded measurements are not uploaded twice.
+            if watermark is not None:
+                await self._update_entry_data({CONF_LAST_SYNC: watermark})
 
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.isoformat()
-
-        return datetime.now(timezone.utc).isoformat()
-
-    @staticmethod
-    def _normalize_percentage(value: Any) -> float | None:
-        """Normalize Withings percentage values for Garmin, handling either 25 or 2500 style inputs."""
-        if value is None:
-            return None
-
-        numeric = float(value)
-        return numeric / 100.0 if numeric > 100 else numeric
-
-    @staticmethod
-    def _normalize_mass_kg(value: Any) -> float | None:
-        """Normalize Withings mass values from grams to kg when the raw value is stored in grams."""
-        if value is None:
-            return None
-
-        numeric = float(value)
-        return numeric / 1000.0 if numeric > 100 else numeric
-
-    async def _upload_weight_data(self, measurements: list[dict]) -> int:
-        """Upload weight and body composition data to Garmin using the original Withings timestamp."""
-        if not self.garmin:
-            raise Exception("Garmin not configured")
-
-        count = 0
-        for measurement in measurements:
-            measures = measurement.get("measures", {})
-            if "weight" not in measures:
-                continue
-
-            timestamp = self._to_garmin_timestamp(measurement.get("timestamp"))
-            weight_kg = self._normalize_mass_kg(measures["weight"])
-
-            percent_fat = None
-            if "fat_ratio" in measures:
-                percent_fat = self._normalize_percentage(measures["fat_ratio"])
-
-            percent_hydration = None
-            if "hydration" in measures:
-                percent_hydration = self._normalize_percentage(measures["hydration"])
-
-            bone_mass_kg = None
-            if "bone_mass" in measures:
-                bone_mass_kg = self._normalize_mass_kg(measures["bone_mass"])
-
-            muscle_mass_kg = None
-            if "muscle_mass" in measures:
-                muscle_mass_kg = self._normalize_mass_kg(measures["muscle_mass"])
-
-            try:
-                self.garmin.add_body_composition(
-                    timestamp=timestamp,
-                    weight=weight_kg,
-                    percent_fat=percent_fat,
-                    percent_hydration=percent_hydration,
-                    bone_mass=bone_mass_kg,
-                    muscle_mass=muscle_mass_kg,
-                )
-                count += 1
-                _LOGGER.info("Uploaded weight data to Garmin at %s: %.2f kg", timestamp, weight_kg)
-            except Exception as e:
-                _LOGGER.error("Error uploading weight data at %s: %s", timestamp, e)
-
-        return count
-
-    async def _upload_blood_pressure_data(self, measurements: list[dict]) -> int:
-        """Upload blood pressure data to Garmin."""
-        if not self.garmin:
-            raise Exception("Garmin not configured")
-
-        count = 0
-        # Blood pressure data would need to be fetched separately
-        # For now, return 0
-        return count
-
-
-async def init_garmin_with_credentials(username: str, password: str, mfa_code: str | None = None) -> dict:
-    """Initialize Garmin session with credentials and optional MFA."""
-    try:
-        # Create Garmin client
-        garmin = Garmin()
-
-        # Login (this will handle MFA if required)
-        if mfa_code:
-            garmin.login(username, password, mfa_code)
+        summary = (
+            f"Synced {result['synced_weight']} weight and "
+            f"{result['synced_blood_pressure']} blood pressure records"
+        )
+        if failure:
+            result["message"] = f"{summary}; {failure}"
         else:
-            # Try login - will raise MFA exception if needed
-            try:
-                garmin.login(username, password)
-            except garminconnect.GarminConnectException as e:
-                if "MFA" in str(e):
-                    return {"mfa_required": True, "session": None}
-                raise
+            result["success"] = True
+            result["message"] = summary
 
-        # Get session tokens
-        tokens = garmin.get_oauth_token()
+    async def _upload_group(
+        self,
+        client: garmin_api.Garmin,
+        group: MeasureGroup,
+        sync_weight: bool,
+        sync_bp: bool,
+        result: dict[str, Any],
+    ) -> None:
+        timestamp = dt_util.as_local(group.timestamp).isoformat()
 
-        return {"mfa_required": False, "success": True, "tokens": tokens}
+        if sync_weight and (body := to_body_composition(group)) is not None:
+            await self.hass.async_add_executor_job(
+                garmin_api.add_body_composition, client, body, timestamp
+            )
+            result["synced_weight"] += 1
+            _LOGGER.info("Uploaded weigh-in at %s: %.2f kg", timestamp, body.weight)
 
-    except Exception as e:
-        _LOGGER.error("Garmin login error: %s", e)
-        return {"mfa_required": False, "success": False, "error": str(e)}
+        if sync_bp and (bp := to_blood_pressure(group)) is not None:
+            await self.hass.async_add_executor_job(
+                garmin_api.add_blood_pressure, client, bp, timestamp
+            )
+            result["synced_blood_pressure"] += 1
+            _LOGGER.info(
+                "Uploaded blood pressure at %s: %s/%s", timestamp, bp.systolic, bp.diastolic
+            )
+
+    async def _ensure_withings_token(self) -> str:
+        """Return a valid Withings access token, refreshing and persisting it if needed."""
+        token: dict[str, Any] = dict(self.entry.data[CONF_WITHINGS_TOKEN])
+        if token.get("expires_at", 0) - _TOKEN_REFRESH_MARGIN > time.time():
+            return token["access_token"]
+
+        _LOGGER.debug("Refreshing Withings access token")
+        try:
+            new_token = await self.withings.refresh_token(token["refresh_token"])
+        except WithingsAuthError as err:
+            raise SyncAuthError(f"Withings token refresh failed: {err}") from err
+
+        # Withings rotates refresh tokens, so the new pair must be saved immediately
+        await self._update_entry_data({CONF_WITHINGS_TOKEN: new_token})
+        return new_token["access_token"]
+
+    async def _garmin_login(self) -> garmin_api.Garmin:
+        """Log in to Garmin from stored tokens, persisting refreshed tokens."""
+        stored = self.entry.data[CONF_GARMIN_TOKENS]
+        try:
+            client, tokens = await self.hass.async_add_executor_job(
+                garmin_api.login_with_tokens, stored
+            )
+        except garmin_api.GarminConnectAuthenticationError as err:
+            raise SyncAuthError(f"Garmin login failed: {err}") from err
+
+        if tokens != stored:
+            await self._update_entry_data({CONF_GARMIN_TOKENS: tokens})
+        return client
+
+    async def _update_entry_data(self, updates: dict[str, Any]) -> None:
+        self.hass.config_entries.async_update_entry(
+            self.entry, data={**self.entry.data, **updates}
+        )

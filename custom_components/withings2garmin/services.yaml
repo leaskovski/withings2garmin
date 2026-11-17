@@ -1,0 +1,16 @@
+sync:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: withings2garmin
+    features:
+      required: false
+      example: "WEIGHT,BLOOD_PRESSURE"
+      selector:
+        select:
+          multiple: true
+          options:
+            - "WEIGHT"
+            - "BLOOD_PRESSURE"

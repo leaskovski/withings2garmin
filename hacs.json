@@ -1,4 +1,5 @@
 {
   "name": "Withings to Garmin Sync",
+  "homeassistant": "2024.11.0",
   "render_readme": true
 }

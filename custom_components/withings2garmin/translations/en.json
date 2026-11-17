@@ -1,62 +1,83 @@
 {
-  "title": "Withings to Garmin Sync",
-  "flow_title": "Withings to Garmin Sync",
-  "step": {
-    "user": {
-      "title": "Configure Account",
-      "description": "Choose which account to configure first.",
-      "menu_options": {
-        "configure_withings": "Configure Withings",
-        "configure_garmin": "Configure Garmin"
-      }
-    },
-    "configure_withings": {
-      "title": "Withings Credentials",
-      "description": "Enter your Withings OAuth credentials. You can use the default values or register your own app at Withings.",
-      "data": {
-        "client_id": "Client ID",
-        "client_secret": "Client Secret"
-      }
-    },
-    "withings_authorize": {
-      "title": "Authorize Withings",
-      "description": "Click the link below to authorize Withings access. After logging in, you will be redirected to a page showing an authorization code. Copy that code and paste it here.",
-      "data": {
-        "code": "Authorization Code"
+  "config": {
+    "step": {
+      "user": {
+        "title": "Withings developer app",
+        "description": "Create an application at https://developer.withings.com (Public API integration) and enter its credentials. The callback URL must exactly match one registered on the Withings app. It does not need to be reachable: you only copy the code from the address bar after authorizing.",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client secret",
+          "callback_url": "Callback URL"
+        }
       },
-      "description_with_code": "After authorizing, you will see a code on the redirect page. Enter it below.",
-      "open_link": "Authorize Withings"
-    },
-    "configure_garmin": {
-      "title": "Garmin Credentials",
-      "description": "Enter your Garmin Connect credentials.",
-      "data": {
-        "username": "Username",
-        "password": "Password"
+      "withings_authorize": {
+        "title": "Authorize Withings",
+        "description": "1. Open [this Withings authorization link]({auth_url}) and grant access.\n2. You will be redirected to `{callback_url}?code=...&state=...` (the page itself may fail to load, that is fine).\n3. Paste the full address from the browser, or just the `code` value, below.\n\n**The code expires about 30 seconds after it is issued**, so paste it promptly. If it has expired, open the link again.",
+        "data": {
+          "code": "Redirect URL or authorization code"
+        }
+      },
+      "garmin": {
+        "title": "Garmin Connect",
+        "description": "Enter your Garmin Connect credentials. The password is only used to log in once and is not stored.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "garmin_mfa": {
+        "title": "Garmin verification code",
+        "description": "Enter the verification code Garmin sent for {email}.",
+        "data": {
+          "mfa_code": "Verification code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate",
+        "description": "The Withings or Garmin session has expired or been revoked. Continue to authorize both accounts again."
       }
     },
-    "garmin_mfa": {
-      "title": "Garmin MFA",
-      "description": "Enter the MFA code from your authenticator app for {username}.",
-      "data": {
-        "mfa_code": "MFA Code"
+    "error": {
+      "no_code": "No authorization code found in what you pasted.",
+      "state_mismatch": "The pasted URL belongs to a different authorization attempt. Use the link shown on this page.",
+      "invalid_code": "Withings rejected the code. It may have expired (codes are valid for about 30 seconds). Open the link again.",
+      "cannot_connect": "Failed to connect to the service.",
+      "invalid_auth": "Invalid Garmin email or password.",
+      "invalid_mfa": "The verification code was rejected. Log in again to receive a new code.",
+      "rate_limited": "Garmin is rate limiting logins. Wait a while and try again.",
+      "unknown": "Unexpected error, check the logs."
+    },
+    "abort": {
+      "already_configured": "This Withings account is already configured.",
+      "reauth_successful": "Re-authentication was successful.",
+      "wrong_account": "You authorized a different Withings account than the one configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Sync options",
+        "data": {
+          "sync_interval": "Automatic sync interval (minutes, 0 to disable)",
+          "features": "Data to sync"
+        }
       }
     }
   },
-  "error": {
-    "withings_config_error": "Error configuring Withings",
-    "no_code_provided": "No authorization code provided",
-    "token_exchange_error": "Failed to exchange authorization code for tokens",
-    "withings_auth_error": "Withings authentication failed",
-    "garmin_login_error": "Failed to login to Garmin",
-    "garmin_mfa_error": "Invalid MFA code"
-  },
-  "abort": {
-    "no_code_provided": "No authorization code was provided",
-    "withings_auth_error": "Withings authentication failed"
-  },
-  "data": {
-    "withings_tokens": "Withings Tokens",
-    "garmin_username": "Garmin Username"
+  "services": {
+    "sync": {
+      "name": "Sync now",
+      "description": "Sync new measurements from Withings to Garmin Connect.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "Only sync this entry. Defaults to all configured entries."
+        },
+        "features": {
+          "name": "Features",
+          "description": "Data to sync. Defaults to the features selected in the integration options."
+        }
+      }
+    }
   }
 }

@@ -1,102 +1,165 @@
 """Withings to Garmin Sync integration for Home Assistant."""
 
-import json
+from __future__ import annotations
+
 import logging
-import os
+from datetime import datetime, timedelta
+from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+import voluptuous as vol
+
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, SERVICE_SYNC, TOKEN_FILE_GARMIN, TOKEN_FILE_WITHINGS
+from .const import (
+    ALL_FEATURES,
+    ATTR_CONFIG_ENTRY_ID,
+    ATTR_FEATURES,
+    CONF_CALLBACK_URL,
+    CONF_CLIENT_ID,
+    CONF_CLIENT_SECRET,
+    CONF_FEATURES,
+    CONF_SYNC_INTERVAL,
+    DEFAULT_FEATURES,
+    DEFAULT_SYNC_INTERVAL,
+    DOMAIN,
+    SERVICE_SYNC,
+)
 from .sync_engine import WithingsGarminSync
+from .withings import WithingsClient
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = []  # No platforms - service only integration
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+type WithingsGarminConfigEntry = ConfigEntry[WithingsGarminSync]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Withings to Garmin Sync from a config entry."""
-    _LOGGER.info("Setting up Withings to Garmin Sync integration")
-
-    # Create config directory for this entry
-    config_dir = hass.config.path(f".withings2garmin_{entry.entry_id}")
-    os.makedirs(config_dir, exist_ok=True)
-
-    # Store config entry data
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {
-        "config_dir": config_dir,
-    }
-
-    # Save Withings tokens if provided in config entry
-    if entry.data.get("withings_tokens"):
-        withings_token_path = os.path.join(config_dir, TOKEN_FILE_WITHINGS)
-        with open(withings_token_path, "w") as f:
-            json.dump(entry.data["withings_tokens"], f)
-        _LOGGER.info("Saved Withings tokens to %s", withings_token_path)
-
-    # Save Garmin tokens if provided in config entry
-    if entry.data.get("garmin_tokens"):
-        garmin_token_path = os.path.join(config_dir, TOKEN_FILE_GARMIN)
-        with open(garmin_token_path, "w") as f:
-            json.dump(entry.data["garmin_tokens"], f)
-        _LOGGER.info("Saved Garmin tokens to %s", garmin_token_path)
-
-    # Register services
-    hass.services.async_register(
-        DOMAIN, 
-        SERVICE_SYNC, 
-        async_sync_service,
-        schema=cv.make_entity_service_schema(
-            {
-                "features": cv.string,
-            }
+def _normalize_features(value: Any) -> list[str]:
+    """Accept either a list or a comma separated string of features."""
+    if isinstance(value, str):
+        value = [part for part in value.split(",")]
+    features = [str(part).strip().upper() for part in value if str(part).strip()]
+    invalid = [f for f in features if f not in ALL_FEATURES]
+    if invalid:
+        raise vol.Invalid(
+            f"Unknown feature(s) {', '.join(invalid)}; valid: {', '.join(ALL_FEATURES)}"
         )
-    )
-
-    return True
+    return features
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    _LOGGER.info("Unloading Withings to Garmin Sync integration")
-
-    # Remove services
-    hass.services.async_remove(DOMAIN, SERVICE_SYNC)
-
-    # Clean up data
-    if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
-        del hass.data[DOMAIN][entry.entry_id]
-
-    return True
-
-
-async def async_sync_service(call: ServiceCall) -> dict:
-    """Handle sync service call."""
-    features = call.data.get("features")
-
-    # Get the config entry
-    entries = call.hass.config_entries.async_entries(DOMAIN)
-    if not entries:
-        return {"success": False, "message": "Integration not configured"}
-
-    entry = entries[0]
-    config_dir = call.hass.data[DOMAIN][entry.entry_id]["config_dir"]
-
-    # Create sync engine
-    sync_engine = WithingsGarminSync(call.hass, config_dir)
-
-    # Run sync
-    result = await sync_engine.sync(features)
-
-    return result
-
-
-# Service schema
-SERVICE_SYNC_SCHEMA = cv.make_entity_service_schema(
+SERVICE_SYNC_SCHEMA = vol.Schema(
     {
-        "features": cv.string,
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Optional(ATTR_FEATURES): _normalize_features,
     }
 )
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the sync service once for the whole integration."""
+
+    async def async_handle_sync(call: ServiceCall) -> ServiceResponse:
+        entry_id = call.data.get(ATTR_CONFIG_ENTRY_ID)
+        entries: list[WithingsGarminConfigEntry] = [
+            entry
+            for entry in hass.config_entries.async_entries(DOMAIN)
+            if entry.state is ConfigEntryState.LOADED
+            and (entry_id is None or entry.entry_id == entry_id)
+        ]
+        if not entries:
+            raise HomeAssistantError(
+                "No loaded Withings to Garmin Sync entry found"
+                + (f" with id {entry_id}" if entry_id else "")
+            )
+
+        results: dict[str, Any] = {}
+        failures: list[str] = []
+        for entry in entries:
+            features = call.data.get(ATTR_FEATURES) or entry.options.get(
+                CONF_FEATURES, DEFAULT_FEATURES
+            )
+            result = await entry.runtime_data.async_sync(features)
+            results[entry.entry_id] = result
+            if not result["success"]:
+                failures.append(f"{entry.title}: {result['message']}")
+
+        if failures:
+            raise HomeAssistantError("; ".join(failures))
+        return {"results": results}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SYNC,
+        async_handle_sync,
+        schema=SERVICE_SYNC_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: WithingsGarminConfigEntry) -> bool:
+    """Set up Withings to Garmin Sync from a config entry."""
+    withings = WithingsClient(
+        async_get_clientsession(hass),
+        entry.data[CONF_CLIENT_ID],
+        entry.data[CONF_CLIENT_SECRET],
+        entry.data[CONF_CALLBACK_URL],
+    )
+    engine = WithingsGarminSync(hass, entry, withings)
+    entry.runtime_data = engine
+
+    interval = int(entry.options.get(CONF_SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL))
+    if interval > 0:
+
+        async def _scheduled_sync(_now: datetime) -> None:
+            features = entry.options.get(CONF_FEATURES, DEFAULT_FEATURES)
+            result = await engine.async_sync(features)
+            _LOGGER.debug("Scheduled sync result: %s", result)
+
+        entry.async_on_unload(
+            async_track_time_interval(
+                hass,
+                _scheduled_sync,
+                timedelta(minutes=interval),
+                name="withings2garmin scheduled sync",
+                cancel_on_shutdown=True,
+            )
+        )
+
+    # Only reload when options change; data updates (token refreshes, last_sync)
+    # also fire update listeners and must not cause a reload.
+    loaded_options = dict(entry.options)
+
+    async def _update_listener(hass: HomeAssistant, updated: ConfigEntry) -> None:
+        if dict(updated.options) != loaded_options:
+            await hass.config_entries.async_reload(updated.entry_id)
+
+    entry.async_on_unload(entry.add_update_listener(_update_listener))
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: WithingsGarminConfigEntry) -> bool:
+    """Unload a config entry."""
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Version 1 entries used an incompatible data layout and never worked; force re-add."""
+    if entry.version < 2:
+        _LOGGER.error(
+            "This Withings to Garmin Sync entry was created by an older, incompatible "
+            "version. Please delete it and add the integration again"
+        )
+        return False
+    return True
