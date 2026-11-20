@@ -5,17 +5,11 @@ from typing import Final
 DOMAIN: Final = "withings2garmin"
 NAME: Final = "Withings to Garmin Sync"
 
-# Withings API
-WITHINGS_AUTHORIZE_URL: Final = "https://account.withings.com/oauth2_user/authorize2"
-WITHINGS_TOKEN_URL: Final = "https://wbsapi.withings.net/v2/oauth2"
-WITHINGS_MEASURE_URL: Final = "https://wbsapi.withings.net/measure"
+# Withings OAuth scope (endpoints and client come from aiowithings)
 WITHINGS_SCOPE: Final = "user.metrics"
 
-# Config entry data keys
-CONF_CLIENT_ID: Final = "client_id"
-CONF_CLIENT_SECRET: Final = "client_secret"
-CONF_CALLBACK_URL: Final = "callback_url"
-CONF_WITHINGS_TOKEN: Final = "withings_token"
+# Config entry data keys. The Withings token is stored under "token" and
+# "auth_implementation" by Home Assistant's OAuth2 flow.
 CONF_GARMIN_EMAIL: Final = "garmin_email"
 CONF_GARMIN_TOKENS: Final = "garmin_tokens"
 CONF_LAST_SYNC: Final = "last_sync"

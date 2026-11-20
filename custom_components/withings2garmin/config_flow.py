@@ -3,79 +3,65 @@
 from __future__ import annotations
 
 import logging
-import secrets
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 import voluptuous as vol
 
 from homeassistant.config_entries import (
     SOURCE_REAUTH,
     ConfigEntry,
-    ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_TOKEN
 from homeassistant.core import callback
+from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from . import garmin as garmin_api
 from .const import (
     ALL_FEATURES,
-    CONF_CALLBACK_URL,
-    CONF_CLIENT_ID,
-    CONF_CLIENT_SECRET,
     CONF_FEATURES,
     CONF_GARMIN_EMAIL,
     CONF_GARMIN_TOKENS,
     CONF_SYNC_INTERVAL,
-    CONF_WITHINGS_TOKEN,
     DEFAULT_FEATURES,
     DEFAULT_SYNC_INTERVAL,
     DOMAIN,
     NAME,
+    WITHINGS_SCOPE,
 )
-from .withings import WithingsAuthError, WithingsClient, WithingsError
 
 _LOGGER = logging.getLogger(__name__)
 
-CONF_CODE = "code"
 CONF_MFA_CODE = "mfa_code"
 
 
-def _extract_code(value: str, expected_state: str) -> tuple[str | None, str | None]:
-    """Accept either a bare code or the full redirect URL. Returns (code, error)."""
-    value = value.strip()
-    if "code=" not in value:
-        return (value or None), (None if value else "no_code")
+class WithingsGarminConfigFlow(
+    config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN
+):
+    """Withings OAuth (run by Home Assistant), then Garmin login."""
 
-    query = parse_qs(urlparse(value).query) if "://" in value else parse_qs(value.lstrip("?"))
-    code = (query.get("code") or [None])[0]
-    state = (query.get("state") or [None])[0]
-    if not code:
-        return None, "no_code"
-    if state is not None and state != expected_state:
-        return None, "state_mismatch"
-    return code, None
-
-
-class WithingsGarminConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Withings to Garmin Sync."""
-
-    VERSION = 2
+    DOMAIN = DOMAIN
+    VERSION = 3
 
     def __init__(self) -> None:
         """Initialize the config flow."""
-        self._client_id: str = ""
-        self._client_secret: str = ""
-        self._callback_url: str = ""
-        self._state: str = secrets.token_urlsafe(16)
-        self._withings_token: dict[str, Any] | None = None
+        super().__init__()
+        self._oauth_data: dict[str, Any] | None = None
         self._garmin_email: str = ""
         self._garmin_login: garmin_api.GarminLoginResult | None = None
+
+    @property
+    def logger(self) -> logging.Logger:
+        """Return logger."""
+        return _LOGGER
+
+    @property
+    def extra_authorize_data(self) -> dict[str, str]:
+        """Extra data appended to the Withings authorize URL."""
+        return {"scope": WITHINGS_SCOPE}
 
     @staticmethod
     @callback
@@ -83,76 +69,31 @@ class WithingsGarminConfigFlow(ConfigFlow, domain=DOMAIN):
         """Return the options flow."""
         return WithingsGarminOptionsFlow()
 
-    def _withings_client(self) -> WithingsClient:
-        return WithingsClient(
-            async_get_clientsession(self.hass),
-            self._client_id,
-            self._client_secret,
-            self._callback_url,
-        )
+    # --- Withings OAuth finished ----------------------------------------------
 
-    # --- Step 1: Withings developer app credentials -------------------------
+    async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
+        """Withings is authorized; continue with Garmin."""
+        await self.async_set_unique_id(str(data[CONF_TOKEN]["userid"]))
+        if self.source == SOURCE_REAUTH:
+            self._abort_if_unique_id_mismatch(reason="wrong_account")
+        else:
+            self._abort_if_unique_id_configured()
+        self._oauth_data = data
+        return await self.async_step_garmin()
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Collect the Withings developer app credentials."""
-        if user_input is not None:
-            self._client_id = user_input[CONF_CLIENT_ID].strip()
-            self._client_secret = user_input[CONF_CLIENT_SECRET].strip()
-            self._callback_url = user_input[CONF_CALLBACK_URL].strip()
-            return await self.async_step_withings_authorize()
+    # --- Garmin credentials -----------------------------------------------------
 
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_CLIENT_ID, default=self._client_id): str,
-                vol.Required(CONF_CLIENT_SECRET, default=self._client_secret): str,
-                vol.Required(CONF_CALLBACK_URL, default=self._callback_url): str,
-            }
-        )
-        return self.async_show_form(step_id="user", data_schema=schema)
-
-    # --- Step 2: authorize on Withings and paste the code back ----------------
-
-    async def async_step_withings_authorize(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Show the authorization link and exchange the returned code."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            code, error = _extract_code(user_input.get(CONF_CODE, ""), self._state)
-            if error:
-                errors["base"] = error
-            else:
-                try:
-                    token = await self._withings_client().request_token(code)
-                except WithingsAuthError as err:
-                    _LOGGER.warning("Withings rejected the authorization code: %s", err)
-                    errors["base"] = "invalid_code"
-                except WithingsError as err:
-                    _LOGGER.error("Withings token exchange failed: %s", err)
-                    errors["base"] = "cannot_connect"
-                else:
-                    self._withings_token = token
-                    await self.async_set_unique_id(token["userid"])
-                    if self.source == SOURCE_REAUTH:
-                        self._abort_if_unique_id_mismatch(reason="wrong_account")
-                    else:
-                        self._abort_if_unique_id_configured()
-                    return await self.async_step_garmin()
-
+    def _garmin_form(self, errors: dict[str, str]) -> ConfigFlowResult:
         return self.async_show_form(
-            step_id="withings_authorize",
-            data_schema=vol.Schema({vol.Required(CONF_CODE): str}),
+            step_id="garmin",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_EMAIL, default=self._garmin_email): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
             errors=errors,
-            description_placeholders={
-                "auth_url": self._withings_client().authorize_url(self._state),
-                "callback_url": self._callback_url,
-            },
         )
-
-    # --- Step 3: Garmin credentials -------------------------------------------
 
     async def async_step_garmin(
         self, user_input: dict[str, Any] | None = None
@@ -183,16 +124,7 @@ class WithingsGarminConfigFlow(ConfigFlow, domain=DOMAIN):
                     return await self.async_step_garmin_mfa()
                 return await self._async_finish(login.tokens)
 
-        return self.async_show_form(
-            step_id="garmin",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_EMAIL, default=self._garmin_email): str,
-                    vol.Required(CONF_PASSWORD): str,
-                }
-            ),
-            errors=errors,
-        )
+        return self._garmin_form(errors)
 
     async def async_step_garmin_mfa(
         self, user_input: dict[str, Any] | None = None
@@ -215,16 +147,7 @@ class WithingsGarminConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.warning("Garmin MFA verification failed: %s", err)
                 # The pending login may be consumed; go back and log in again.
                 self._garmin_login = None
-                return self.async_show_form(
-                    step_id="garmin",
-                    data_schema=vol.Schema(
-                        {
-                            vol.Required(CONF_EMAIL, default=self._garmin_email): str,
-                            vol.Required(CONF_PASSWORD): str,
-                        }
-                    ),
-                    errors={"base": "invalid_mfa"},
-                )
+                return self._garmin_form({"base": "invalid_mfa"})
             else:
                 self._garmin_login = None
                 return await self._async_finish(tokens)
@@ -237,13 +160,10 @@ class WithingsGarminConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def _async_finish(self, garmin_tokens: str | None) -> ConfigFlowResult:
-        assert self._withings_token is not None
+        assert self._oauth_data is not None
         assert garmin_tokens
         data = {
-            CONF_CLIENT_ID: self._client_id,
-            CONF_CLIENT_SECRET: self._client_secret,
-            CONF_CALLBACK_URL: self._callback_url,
-            CONF_WITHINGS_TOKEN: self._withings_token,
+            **self._oauth_data,  # auth_implementation + token
             CONF_GARMIN_EMAIL: self._garmin_email,
             CONF_GARMIN_TOKENS: garmin_tokens,
         }
@@ -267,9 +187,6 @@ class WithingsGarminConfigFlow(ConfigFlow, domain=DOMAIN):
         self, entry_data: Mapping[str, Any]
     ) -> ConfigFlowResult:
         """Start re-authentication when tokens are rejected."""
-        self._client_id = entry_data[CONF_CLIENT_ID]
-        self._client_secret = entry_data[CONF_CLIENT_SECRET]
-        self._callback_url = entry_data[CONF_CALLBACK_URL]
         self._garmin_email = entry_data.get(CONF_GARMIN_EMAIL, "")
         return await self.async_step_reauth_confirm()
 
@@ -279,7 +196,7 @@ class WithingsGarminConfigFlow(ConfigFlow, domain=DOMAIN):
         """Confirm and restart the Withings + Garmin authorization."""
         if user_input is None:
             return self.async_show_form(step_id="reauth_confirm")
-        return await self.async_step_withings_authorize()
+        return await self.async_step_user()
 
 
 class WithingsGarminOptionsFlow(OptionsFlow):

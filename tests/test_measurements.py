@@ -1,12 +1,23 @@
 """Tests for the Withings -> Garmin conversion helpers.
 
-measurements.py has no Home Assistant dependencies, so it is loaded directly
-from its file path; run with `pytest tests/`.
+measurements.py has no Home Assistant dependencies (only aiowithings), so it is
+loaded directly from its file path; run with `pytest tests/`.
+
+Groups are built as simple namespaces with the same attributes as
+aiowithings.MeasurementGroup, whose constructor differs between 3.x and 4.x.
+Unit decoding (value * 10^unit) is done by aiowithings and not re-tested here.
 """
 
 import importlib.util
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+aiowithings = pytest.importorskip("aiowithings")
+T = aiowithings.MeasurementType
 
 _PATH = (
     Path(__file__).resolve().parents[1]
@@ -16,47 +27,38 @@ _PATH = (
 )
 _spec = importlib.util.spec_from_file_location("w2g_measurements", _PATH)
 m = importlib.util.module_from_spec(_spec)
+# @dataclass resolves string annotations via sys.modules, so register first
+sys.modules[_spec.name] = m
 _spec.loader.exec_module(m)
 
+TAKEN_AT = datetime.fromtimestamp(1710000000, tz=timezone.utc)
 
-def _grp(measures, date=1710000000, modified=1710000100, grpid=1):
-    return {
-        "grpid": grpid,
-        "date": date,
-        "modified": modified,
-        "category": 1,
-        "measures": [
-            {"type": t, "value": v, "unit": u} for t, (v, u) in measures.items()
+
+def _grp(values):
+    return SimpleNamespace(
+        taken_at=TAKEN_AT,
+        measurements=[
+            SimpleNamespace(measurement_type=t, value=v) for t, v in values.items()
         ],
-    }
+    )
 
 
-def test_decode_value_applies_unit_exponent():
-    assert m.decode_value({"value": 72350, "unit": -3}) == 72.35
-    assert m.decode_value({"value": 255, "unit": -1}) == 25.5
-    assert m.decode_value({"value": 120, "unit": 0}) == 120
-
-
-def test_body_composition_from_real_withings_shape():
-    group = m.parse_groups(
-        [
-            _grp(
-                {
-                    m.MEAS_WEIGHT: (72350, -3),  # 72.35 kg
-                    m.MEAS_FAT_RATIO: (255, -1),  # 25.5 %
-                    m.MEAS_MUSCLE_MASS: (5012, -2),  # 50.12 kg
-                    m.MEAS_HYDRATION: (3980, -2),  # 39.80 kg of water
-                    m.MEAS_BONE_MASS: (285, -2),  # 2.85 kg
-                    m.MEAS_VISCERAL_FAT: (8, 0),
-                }
-            )
-        ]
-    )[0]
-
-    body = m.to_body_composition(group)
+def test_body_composition():
+    body = m.to_body_composition(
+        _grp(
+            {
+                T.WEIGHT: 72.35,
+                T.FAT_RATIO: 25.5,
+                T.MUSCLE_MASS: 50.12,
+                T.HYDRATION: 39.80,  # kg of water
+                T.BONE_MASS: 2.85,
+                T.VISCERAL_FAT: 8,
+            }
+        )
+    )
 
     assert body is not None
-    assert body.timestamp == datetime.fromtimestamp(1710000000, tz=timezone.utc)
+    assert body.timestamp == TAKEN_AT
     assert body.weight == 72.35
     assert body.percent_fat == 25.5
     assert body.muscle_mass == 50.12
@@ -66,30 +68,24 @@ def test_body_composition_from_real_withings_shape():
 
 
 def test_body_composition_requires_weight():
-    group = m.parse_groups([_grp({m.MEAS_FAT_RATIO: (255, -1)})])[0]
-    assert m.to_body_composition(group) is None
+    assert m.to_body_composition(_grp({T.FAT_RATIO: 25.5})) is None
 
 
 def test_weight_only_group():
-    group = m.parse_groups([_grp({m.MEAS_WEIGHT: (80, 0)})])[0]
-    body = m.to_body_composition(group)
+    body = m.to_body_composition(_grp({T.WEIGHT: 80}))
     assert body.weight == 80
     assert body.percent_fat is None
     assert body.percent_hydration is None
 
 
 def test_blood_pressure():
-    group = m.parse_groups(
-        [
-            _grp(
-                {
-                    m.MEAS_SYSTOLIC: (121, 0),
-                    m.MEAS_DIASTOLIC: (79, 0),
-                    m.MEAS_HEART_PULSE: (64, 0),
-                }
-            )
-        ]
-    )[0]
+    group = _grp(
+        {
+            T.SYSTOLIC_BLOOD_PRESSURE: 121,
+            T.DIASTOLIC_BLOOD_PRESSURE: 79,
+            T.HEART_RATE: 64,
+        }
+    )
     bp = m.to_blood_pressure(group)
     assert (bp.systolic, bp.diastolic, bp.pulse) == (121, 79, 64)
     # A BP-only group must not be treated as a weigh-in
@@ -97,30 +93,21 @@ def test_blood_pressure():
 
 
 def test_blood_pressure_out_of_range_is_skipped():
-    group = m.parse_groups(
-        [_grp({m.MEAS_SYSTOLIC: (300, 0), m.MEAS_DIASTOLIC: (79, 0)})]
-    )[0]
+    group = _grp({T.SYSTOLIC_BLOOD_PRESSURE: 300, T.DIASTOLIC_BLOOD_PRESSURE: 79})
     assert m.to_blood_pressure(group) is None
 
 
 def test_invalid_pulse_is_dropped_not_fatal():
-    group = m.parse_groups(
-        [
-            _grp(
-                {
-                    m.MEAS_SYSTOLIC: (120, 0),
-                    m.MEAS_DIASTOLIC: (80, 0),
-                    m.MEAS_HEART_PULSE: (5, 0),
-                }
-            )
-        ]
-    )[0]
+    group = _grp(
+        {
+            T.SYSTOLIC_BLOOD_PRESSURE: 120,
+            T.DIASTOLIC_BLOOD_PRESSURE: 80,
+            T.HEART_RATE: 5,
+        }
+    )
     assert m.to_blood_pressure(group).pulse is None
 
 
-def test_parse_groups_ignores_malformed_measures_and_defaults_modified():
-    groups = m.parse_groups(
-        [{"grpid": 9, "date": 100, "measures": [{"type": 1}, {"type": 1, "value": 70, "unit": 0}]}]
-    )
-    assert groups[0].values == {1: 70.0}
-    assert groups[0].modified == 100
+def test_unknown_measurement_types_are_ignored():
+    body = m.to_body_composition(_grp({T.WEIGHT: 70, T.UNKNOWN: 1}))
+    assert body.weight == 70
