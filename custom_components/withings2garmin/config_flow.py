@@ -14,7 +14,8 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_TOKEN
+from homeassistant.components.webhook import async_generate_id as webhook_generate_id
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, CONF_TOKEN, CONF_WEBHOOK_ID
 from homeassistant.core import callback
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers import config_validation as cv
@@ -25,9 +26,7 @@ from .const import (
     CONF_FEATURES,
     CONF_GARMIN_EMAIL,
     CONF_GARMIN_TOKENS,
-    CONF_SYNC_INTERVAL,
     DEFAULT_FEATURES,
-    DEFAULT_SYNC_INTERVAL,
     DOMAIN,
     NAME,
     WITHINGS_SCOPE,
@@ -168,17 +167,14 @@ class WithingsGarminConfigFlow(
             CONF_GARMIN_TOKENS: garmin_tokens,
         }
         if self.source == SOURCE_REAUTH:
-            # data_updates merges, so last_sync is preserved
+            # data_updates merges, so last_sync and webhook_id are preserved
             return self.async_update_reload_and_abort(
                 self._get_reauth_entry(), data_updates=data
             )
         return self.async_create_entry(
             title=f"{NAME} ({self._garmin_email})",
-            data=data,
-            options={
-                CONF_SYNC_INTERVAL: DEFAULT_SYNC_INTERVAL,
-                CONF_FEATURES: list(DEFAULT_FEATURES),
-            },
+            data={**data, CONF_WEBHOOK_ID: webhook_generate_id()},
+            options={CONF_FEATURES: list(DEFAULT_FEATURES)},
         )
 
     # --- Re-authentication ----------------------------------------------------
@@ -200,7 +196,7 @@ class WithingsGarminConfigFlow(
 
 
 class WithingsGarminOptionsFlow(OptionsFlow):
-    """Options: sync interval and features."""
+    """Options: features to sync."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -211,10 +207,6 @@ class WithingsGarminOptionsFlow(OptionsFlow):
         options = self.config_entry.options
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_SYNC_INTERVAL,
-                    default=options.get(CONF_SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL),
-                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=1440)),
                 vol.Required(
                     CONF_FEATURES,
                     default=options.get(CONF_FEATURES, DEFAULT_FEATURES),

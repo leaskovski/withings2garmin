@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -43,6 +45,27 @@ _LOGGER = logging.getLogger(__name__)
 
 class SyncAuthError(Exception):
     """Credentials for one of the services are no longer valid."""
+
+
+@contextmanager
+def translate_withings_auth_errors() -> Iterator[None]:
+    """Turn the ways an aiowithings call reports bad credentials into SyncAuthError.
+
+    Token refresh happens inside aiowithings, so these can surface from any call.
+    """
+    try:
+        yield
+    except (WithingsAuthenticationFailedError, WithingsUnauthorizedError) as err:
+        raise SyncAuthError(f"Withings rejected the access token: {err}") from err
+    except ConfigEntryAuthFailed as err:
+        # Newer Home Assistant: refresh token rejected (OAuth2TokenRequestReauthError)
+        raise SyncAuthError(f"Withings token refresh failed: {err}") from err
+    except ClientResponseError as err:
+        # Older Home Assistant passes the token endpoint's error through as-is;
+        # application_credentials maps a rejected refresh token to HTTP 400.
+        if 400 <= err.status < 500 and err.status != 429:
+            raise SyncAuthError(f"Withings token refresh failed: {err}") from err
+        raise
 
 
 class WithingsGarminSync:
@@ -179,19 +202,8 @@ class WithingsGarminSync:
         self, since: datetime, meastypes: list[MeasurementType]
     ) -> list[MeasurementGroup]:
         """Fetch measure groups; token refresh happens inside aiowithings."""
-        try:
+        with translate_withings_auth_errors():
             return await self.withings.get_measurement_since(since, meastypes)
-        except (WithingsAuthenticationFailedError, WithingsUnauthorizedError) as err:
-            raise SyncAuthError(f"Withings rejected the access token: {err}") from err
-        except ConfigEntryAuthFailed as err:
-            # Newer Home Assistant: refresh token rejected (OAuth2TokenRequestReauthError)
-            raise SyncAuthError(f"Withings token refresh failed: {err}") from err
-        except ClientResponseError as err:
-            # Older Home Assistant passes the token endpoint's error through as-is;
-            # application_credentials maps a rejected refresh token to HTTP 400.
-            if 400 <= err.status < 500 and err.status != 429:
-                raise SyncAuthError(f"Withings token refresh failed: {err}") from err
-            raise
 
     async def _garmin_login(self) -> garmin_api.Garmin:
         """Log in to Garmin from stored tokens, persisting refreshed tokens."""
