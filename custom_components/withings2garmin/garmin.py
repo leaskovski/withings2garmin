@@ -85,6 +85,7 @@ def add_body_composition(client: Garmin, data: BodyComposition, timestamp: str) 
         bone_mass=data.bone_mass,
         muscle_mass=data.muscle_mass,
         visceral_fat_rating=data.visceral_fat_rating,
+        bmi=data.bmi,
     )
 
 

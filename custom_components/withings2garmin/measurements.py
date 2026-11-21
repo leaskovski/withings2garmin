@@ -6,6 +6,7 @@ can be unit tested in isolation.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -30,6 +31,9 @@ _SYSTOLIC_RANGE = (70, 260)
 _DIASTOLIC_RANGE = (40, 150)
 _PULSE_RANGE = (20, 250)
 
+# Plausible human height in metres; anything else is treated as bad data
+_HEIGHT_RANGE_M = (0.5, 2.75)
+
 
 @dataclass(frozen=True)
 class BodyComposition:
@@ -42,6 +46,7 @@ class BodyComposition:
     bone_mass: float | None = None
     muscle_mass: float | None = None
     visceral_fat_rating: float | None = None
+    bmi: float | None = None
 
 
 @dataclass(frozen=True)
@@ -63,12 +68,61 @@ def _round(value: float | None, digits: int = 2) -> float | None:
     return None if value is None else round(value, digits)
 
 
-def to_body_composition(group: MeasurementGroup) -> BodyComposition | None:
-    """Build a Garmin body composition payload, or None if there is no weight."""
+def _plausible_height(value: float | None) -> bool:
+    return value is not None and _HEIGHT_RANGE_M[0] <= value <= _HEIGHT_RANGE_M[1]
+
+
+def heights_from_groups(
+    groups: Iterable[MeasurementGroup],
+) -> list[tuple[datetime, float]]:
+    """Extract plausible height readings (metres), oldest first."""
+    heights = [
+        (group.taken_at, value)
+        for group in groups
+        if _plausible_height(value := _values(group).get(MeasurementType.HEIGHT))
+    ]
+    return sorted(heights, key=lambda h: h[0])
+
+
+def height_at(heights: list[tuple[datetime, float]], when: datetime) -> float | None:
+    """Height in effect at `when`: the latest reading taken at or before it.
+
+    Falls back to the earliest reading when every reading is newer, since a
+    weigh-in made before the height was entered in Withings still needs a BMI.
+    """
+    if not heights:
+        return None
+    current = heights[0][1]
+    for taken_at, value in heights:
+        if taken_at > when:
+            break
+        current = value
+    return current
+
+
+def calculate_bmi(weight_kg: float, height_m: float | None) -> float | None:
+    """BMI = weight (kg) / height (m) squared, or None without a usable height."""
+    if height_m is None or height_m <= 0 or weight_kg <= 0:
+        return None
+    return round(weight_kg / (height_m**2), 1)
+
+
+def to_body_composition(
+    group: MeasurementGroup, height_m: float | None = None
+) -> BodyComposition | None:
+    """Build a Garmin body composition payload, or None if there is no weight.
+
+    BMI is calculated from the weight and `height_m`; a height measured in the
+    same group takes precedence.
+    """
     values = _values(group)
     weight = values.get(MeasurementType.WEIGHT)
     if weight is None or weight <= 0:
         return None
+
+    group_height = values.get(MeasurementType.HEIGHT)
+    if _plausible_height(group_height):
+        height_m = group_height
 
     hydration_kg = values.get(MeasurementType.HYDRATION)
     percent_hydration = (
@@ -83,6 +137,7 @@ def to_body_composition(group: MeasurementGroup) -> BodyComposition | None:
         bone_mass=_round(values.get(MeasurementType.BONE_MASS)),
         muscle_mass=_round(values.get(MeasurementType.MUSCLE_MASS)),
         visceral_fat_rating=_round(values.get(MeasurementType.VISCERAL_FAT)),
+        bmi=calculate_bmi(weight, height_m),
     )
 
 

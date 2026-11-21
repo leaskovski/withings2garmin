@@ -36,6 +36,8 @@ from .const import (
 from .measurements import (
     BLOOD_PRESSURE_TYPES,
     BODY_COMPOSITION_TYPES,
+    height_at,
+    heights_from_groups,
     to_blood_pressure,
     to_body_composition,
 )
@@ -139,6 +141,20 @@ class WithingsGarminSync:
             result["message"] = "No new data to sync"
             return
 
+        # Height is not part of a weigh-in; Withings stores it as its own
+        # (rarely updated) measurement, so fetch its full history for BMI.
+        heights: list[tuple[datetime, float]] = []
+        if sync_weight:
+            heights = heights_from_groups(
+                g
+                for g in await self._fetch_groups(
+                    datetime.fromtimestamp(0, tz=UTC), [MeasurementType.HEIGHT]
+                )
+                if g.category == MeasurementGroupCategory.REAL
+            )
+            if not heights:
+                _LOGGER.warning("No height recorded in Withings; BMI will not be synced")
+
         client = await self._garmin_login()
 
         watermark: int | None = None
@@ -146,7 +162,9 @@ class WithingsGarminSync:
         try:
             for group in groups:
                 try:
-                    await self._upload_group(client, group, sync_weight, sync_bp, result)
+                    await self._upload_group(
+                        client, group, sync_weight, sync_bp, heights, result
+                    )
                 except garmin_api.GarminConnectAuthenticationError as err:
                     raise SyncAuthError(f"Garmin rejected the session: {err}") from err
                 except Exception as err:  # noqa: BLE001
@@ -178,11 +196,14 @@ class WithingsGarminSync:
         group: MeasurementGroup,
         sync_weight: bool,
         sync_bp: bool,
+        heights: list[tuple[datetime, float]],
         result: dict[str, Any],
     ) -> None:
         timestamp = dt_util.as_local(group.taken_at).isoformat()
 
-        if sync_weight and (body := to_body_composition(group)) is not None:
+        if sync_weight and (
+            body := to_body_composition(group, height_at(heights, group.taken_at))
+        ) is not None:
             await self.hass.async_add_executor_job(
                 garmin_api.add_body_composition, client, body, timestamp
             )

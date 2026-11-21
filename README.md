@@ -6,7 +6,7 @@ A Home Assistant custom integration that copies measurements from Withings to Ga
 
 ## Features
 
-- Uploads weigh-ins with body composition to Garmin: weight, body fat %, muscle mass, bone mass, hydration % and visceral fat.
+- Uploads weigh-ins with body composition to Garmin: weight, BMI, body fat %, muscle mass, bone mass, hydration % and visceral fat.
 - Can also upload blood pressure readings (systolic, diastolic and pulse).
 - Syncs within seconds of a new measurement: Withings notifies Home Assistant through a webhook. You can also sync on demand with the `withings2garmin.sync` service.
 - Checks itself: if no notification arrives for 24 hours, it runs a fallback sync and re-creates the Withings subscription if it's gone.
@@ -98,6 +98,7 @@ response_variable: sync_result
 | Hydration (77, kg) | Body water %, calculated as hydration ÷ weight |
 | Bone mass (88) | Bone mass |
 | Visceral fat (170) | Visceral fat rating |
+| Height (4) + Weight (1) | BMI, calculated as weight ÷ height². Uses the height recorded in Withings at the time of the weigh-in; left out if no height is set |
 | Systolic / Diastolic / Pulse (10 / 9 / 11) | Blood pressure |
 
 ## Troubleshooting
