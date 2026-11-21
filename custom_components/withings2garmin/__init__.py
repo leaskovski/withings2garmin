@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any
 
 import voluptuous as vol
+from aiowithings import WithingsClient
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import CONF_ACCESS_TOKEN
 from homeassistant.core import (
     HomeAssistant,
     ServiceCall,
@@ -18,6 +21,10 @@ from homeassistant.core import (
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.config_entry_oauth2_flow import (
+    OAuth2Session,
+    async_get_config_entry_implementation,
+)
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
@@ -25,9 +32,6 @@ from .const import (
     ALL_FEATURES,
     ATTR_CONFIG_ENTRY_ID,
     ATTR_FEATURES,
-    CONF_CALLBACK_URL,
-    CONF_CLIENT_ID,
-    CONF_CLIENT_SECRET,
     CONF_FEATURES,
     CONF_SYNC_INTERVAL,
     DEFAULT_FEATURES,
@@ -36,7 +40,6 @@ from .const import (
     SERVICE_SYNC,
 )
 from .sync_engine import WithingsGarminSync
-from .withings import WithingsClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,12 +113,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: WithingsGarminConfigEntry) -> bool:
     """Set up Withings to Garmin Sync from a config entry."""
-    withings = WithingsClient(
-        async_get_clientsession(hass),
-        entry.data[CONF_CLIENT_ID],
-        entry.data[CONF_CLIENT_SECRET],
-        entry.data[CONF_CALLBACK_URL],
-    )
+    implementation = await async_get_config_entry_implementation(hass, entry)
+    oauth_session = OAuth2Session(hass, entry, implementation)
+    refresh_lock = asyncio.Lock()
+
+    async def _refresh_token() -> str:
+        # Called by aiowithings before every request; refreshes (and persists the
+        # rotated refresh token) only when the access token is about to expire.
+        async with refresh_lock:
+            await oauth_session.async_ensure_token_valid()
+            return oauth_session.token[CONF_ACCESS_TOKEN]
+
+    withings = WithingsClient(session=async_get_clientsession(hass))
+    withings.refresh_token_function = _refresh_token
+
     engine = WithingsGarminSync(hass, entry, withings)
     entry.runtime_data = engine
 
@@ -155,11 +166,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: WithingsGarminConfigEnt
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Version 1 entries used an incompatible data layout and never worked; force re-add."""
-    if entry.version < 2:
+    """Entries before v3 used the built-in Withings OAuth handling; force re-add."""
+    if entry.version < 3:
         _LOGGER.error(
             "This Withings to Garmin Sync entry was created by an older, incompatible "
-            "version. Please delete it and add the integration again"
+            "version (Withings sign-in now uses Home Assistant Application "
+            "Credentials). Please delete it and add the integration again"
         )
         return False
     return True

@@ -3,11 +3,12 @@
   "name": "Withings to Garmin Sync",
   "codeowners": ["@leaskovski"],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["application_credentials"],
   "documentation": "https://github.com/leaskovski/withings2garmin",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/leaskovski/withings2garmin/issues",
-  "requirements": ["garminconnect>=0.3.20"],
-  "version": "0.2.0"
+  "loggers": ["aiowithings"],
+  "requirements": ["aiowithings>=3.1.6", "garminconnect>=0.3.20"],
+  "version": "0.3.0"
 }

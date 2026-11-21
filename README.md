@@ -30,17 +30,23 @@ Copy `custom_components/withings2garmin` into your Home Assistant `config/custom
 
 ## Configuration
 
+Withings sign-in uses Home Assistant's built-in OAuth support (Application Credentials) and the [aiowithings](https://github.com/joostlek/python-withings) library, the same pieces the core Withings integration uses.
+
 ### 1. Create a Withings developer app
 1. Sign in at <https://developer.withings.com/dashboard/> and create an application (*Public API integration*).
-2. Set a **Callback URL**. It must match exactly what you enter in Home Assistant, but it doesn't need to serve a page. For example, use your Home Assistant URL (`https://homeassistant.local:8123/`).
+2. Set the **Callback URL** to `https://my.home-assistant.io/redirect/oauth`.
 3. Note the **Client ID** and **Client Secret**.
+
+You can reuse an app you already created for the core Withings integration, as long as that callback URL is registered.
 
 ### 2. Add the integration
 Settings → Devices & Services → Add Integration → **Withings to Garmin Sync**.
 
-1. Enter the Withings Client ID, Client Secret and Callback URL.
-2. Click the authorization link and grant access. Your browser is redirected to `<callback>?code=...&state=...`. Copy the **whole address** from the address bar and paste it into the form. Withings codes expire after about **30 seconds**, so do this quickly. If the code expires, click the link again.
+1. When asked, enter the Withings Client ID and Client Secret. They're saved under Settings → Devices & Services → ⋮ → Application credentials.
+2. Sign in to Withings in the window that opens and grant access. You're sent back to Home Assistant automatically.
 3. Enter your Garmin Connect email and password, then the verification code if Garmin asks for one.
+
+> **Upgrading from 0.2.x:** older entries use a different sign-in method and won't load. Delete the entry, add the new callback URL to your Withings app, and add the integration again. Your Garmin history isn't affected. The first sync re-checks the last 7 days, so measurements from that period may be uploaded again.
 
 ### 3. Options
 Click **Configure** on the integration to set:
@@ -100,10 +106,11 @@ automation:
 
 ## Development
 
-The conversion logic in `measurements.py` has no Home Assistant dependency:
+The conversion logic in `measurements.py` depends only on `aiowithings`. The sync engine tests also need Home Assistant and are skipped if it isn't installed:
 
 ```bash
-pip install pytest
+pip install pytest aiowithings            # measurement tests
+pip install homeassistant garminconnect   # also run the sync engine tests
 pytest tests/
 ```
 

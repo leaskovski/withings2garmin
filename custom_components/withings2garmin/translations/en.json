@@ -1,21 +1,11 @@
 {
+  "application_credentials": {
+    "description": "Withings to Garmin Sync needs a Withings client ID and secret.\n\n1. Go to the [Withings Developer Dashboard]({developer_dashboard_url}) (Public Cloud) and log in.\n1. Select **Create an application** and tick **Public API integration**.\n1. Choose **Development** as the target environment and enter a name and description.\n1. Enter `{redirect_url}` as the registered callback URL. Don't press the button to test it.\n1. Enter the client ID and secret shown in the dashboard here."
+  },
   "config": {
     "step": {
-      "user": {
-        "title": "Withings developer app",
-        "description": "Create an application at https://developer.withings.com (Public API integration) and enter its credentials. The callback URL must exactly match one registered on the Withings app. It does not need to be reachable: you only copy the code from the address bar after authorizing.",
-        "data": {
-          "client_id": "Client ID",
-          "client_secret": "Client secret",
-          "callback_url": "Callback URL"
-        }
-      },
-      "withings_authorize": {
-        "title": "Authorize Withings",
-        "description": "1. Open [this Withings authorization link]({auth_url}) and grant access.\n2. You will be redirected to `{callback_url}?code=...&state=...` (the page itself may fail to load, that is fine).\n3. Paste the full address from the browser, or just the `code` value, below.\n\n**The code expires about 30 seconds after it is issued**, so paste it promptly. If it has expired, open the link again.",
-        "data": {
-          "code": "Redirect URL or authorization code"
-        }
+      "pick_implementation": {
+        "title": "Pick authentication method"
       },
       "garmin": {
         "title": "Garmin Connect",
@@ -38,9 +28,6 @@
       }
     },
     "error": {
-      "no_code": "No authorization code found in what you pasted.",
-      "state_mismatch": "The pasted URL belongs to a different authorization attempt. Use the link shown on this page.",
-      "invalid_code": "Withings rejected the code. It may have expired (codes are valid for about 30 seconds). Open the link again.",
       "cannot_connect": "Failed to connect to the service.",
       "invalid_auth": "Invalid Garmin email or password.",
       "invalid_mfa": "The verification code was rejected. Log in again to receive a new code.",
@@ -50,7 +37,19 @@
     "abort": {
       "already_configured": "This Withings account is already configured.",
       "reauth_successful": "Re-authentication was successful.",
-      "wrong_account": "You authorized a different Withings account than the one configured."
+      "wrong_account": "You authorized a different Withings account than the one configured.",
+      "missing_configuration": "No Withings application credentials are set up. Add them under Settings → Devices & services → Application credentials.",
+      "missing_credentials": "No Withings application credentials are set up. Add them under Settings → Devices & services → Application credentials.",
+      "authorize_url_timeout": "Timed out generating the Withings authorization URL.",
+      "no_url_available": "No URL is available. Check that Home Assistant's external or internal URL is configured.",
+      "user_rejected_authorize": "Withings access was not granted.",
+      "oauth_error": "Withings returned invalid token data.",
+      "oauth_failed": "Getting the Withings access token failed.",
+      "oauth_timeout": "Timed out getting the Withings access token.",
+      "oauth_unauthorized": "Withings rejected the authorization."
+    },
+    "create_entry": {
+      "default": "Successfully authenticated with Withings and Garmin."
     }
   },
   "options": {

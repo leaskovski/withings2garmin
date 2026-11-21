@@ -4,19 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from aiohttp import ClientError, ClientResponseError
+from aiowithings import (
+    MeasurementGroup,
+    MeasurementGroupCategory,
+    MeasurementType,
+    WithingsAuthenticationFailedError,
+    WithingsClient,
+    WithingsError,
+    WithingsUnauthorizedError,
+)
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.util import dt as dt_util
 
 from . import garmin as garmin_api
 from .const import (
     CONF_GARMIN_TOKENS,
     CONF_LAST_SYNC,
-    CONF_WITHINGS_TOKEN,
     FEATURE_BLOOD_PRESSURE,
     FEATURE_WEIGHT,
     INITIAL_SYNC_DAYS,
@@ -24,17 +34,11 @@ from .const import (
 from .measurements import (
     BLOOD_PRESSURE_TYPES,
     BODY_COMPOSITION_TYPES,
-    MeasureGroup,
-    parse_groups,
     to_blood_pressure,
     to_body_composition,
 )
-from .withings import WithingsAuthError, WithingsClient, WithingsError
 
 _LOGGER = logging.getLogger(__name__)
-
-# Refresh the Withings access token when it has less than this left (seconds)
-_TOKEN_REFRESH_MARGIN = 300
 
 
 class SyncAuthError(Exception):
@@ -67,7 +71,7 @@ class WithingsGarminSync:
                 _LOGGER.error("Withings to Garmin sync needs re-authentication: %s", err)
                 result["message"] = str(err)
                 self.entry.async_start_reauth(self.hass)
-            except (WithingsError, garmin_api.GarminConnectConnectionError,
+            except (WithingsError, ClientError, garmin_api.GarminConnectConnectionError,
                     garmin_api.GarminConnectTooManyRequestsError) as err:
                 _LOGGER.error("Withings to Garmin sync failed: %s", err)
                 result["message"] = str(err)
@@ -84,32 +88,29 @@ class WithingsGarminSync:
             result["message"] = "No features selected"
             return
 
-        meastypes: list[int] = []
+        meastypes: list[MeasurementType] = []
         if sync_weight:
             meastypes.extend(BODY_COMPOSITION_TYPES)
         if sync_bp:
             meastypes.extend(BLOOD_PRESSURE_TYPES)
 
-        access_token = await self._ensure_withings_token()
-
         last_sync = self.entry.data.get(CONF_LAST_SYNC)
         if last_sync is None:
-            lastupdate = int(
-                (dt_util.utcnow() - timedelta(days=INITIAL_SYNC_DAYS)).timestamp()
-            )
+            since = dt_util.utcnow() - timedelta(days=INITIAL_SYNC_DAYS)
         else:
             # Withings returns groups modified at or after `lastupdate`; +1 avoids
             # re-uploading the last group we already handled.
-            lastupdate = int(last_sync) + 1
+            since = datetime.fromtimestamp(int(last_sync) + 1, tz=UTC)
 
-        try:
-            raw_groups = await self.withings.get_measure_groups(
-                access_token, lastupdate, meastypes
-            )
-        except WithingsAuthError as err:
-            raise SyncAuthError(f"Withings rejected the access token: {err}") from err
-
-        groups = sorted(parse_groups(raw_groups), key=lambda g: (g.modified, g.date))
+        groups = sorted(
+            (
+                g
+                for g in await self._fetch_groups(since, meastypes)
+                # real measurements only, not user objectives
+                if g.category == MeasurementGroupCategory.REAL
+            ),
+            key=lambda g: (g.updated_at, g.taken_at),
+        )
         if not groups:
             result["success"] = True
             result["message"] = "No new data to sync"
@@ -128,10 +129,10 @@ class WithingsGarminSync:
                 except Exception as err:  # noqa: BLE001
                     # Stop here so the failed group (and everything after it) is
                     # retried next time instead of being silently skipped.
-                    failure = f"Upload of measurement {group.grpid} failed: {err}"
+                    failure = f"Upload of measurement {group.group_id} failed: {err}"
                     _LOGGER.error(failure)
                     break
-                watermark = group.modified
+                watermark = int(group.updated_at.timestamp())
         finally:
             # Always record progress, even if we bail out with an auth error,
             # so already-uploaded measurements are not uploaded twice.
@@ -151,12 +152,12 @@ class WithingsGarminSync:
     async def _upload_group(
         self,
         client: garmin_api.Garmin,
-        group: MeasureGroup,
+        group: MeasurementGroup,
         sync_weight: bool,
         sync_bp: bool,
         result: dict[str, Any],
     ) -> None:
-        timestamp = dt_util.as_local(group.timestamp).isoformat()
+        timestamp = dt_util.as_local(group.taken_at).isoformat()
 
         if sync_weight and (body := to_body_composition(group)) is not None:
             await self.hass.async_add_executor_job(
@@ -174,21 +175,23 @@ class WithingsGarminSync:
                 "Uploaded blood pressure at %s: %s/%s", timestamp, bp.systolic, bp.diastolic
             )
 
-    async def _ensure_withings_token(self) -> str:
-        """Return a valid Withings access token, refreshing and persisting it if needed."""
-        token: dict[str, Any] = dict(self.entry.data[CONF_WITHINGS_TOKEN])
-        if token.get("expires_at", 0) - _TOKEN_REFRESH_MARGIN > time.time():
-            return token["access_token"]
-
-        _LOGGER.debug("Refreshing Withings access token")
+    async def _fetch_groups(
+        self, since: datetime, meastypes: list[MeasurementType]
+    ) -> list[MeasurementGroup]:
+        """Fetch measure groups; token refresh happens inside aiowithings."""
         try:
-            new_token = await self.withings.refresh_token(token["refresh_token"])
-        except WithingsAuthError as err:
+            return await self.withings.get_measurement_since(since, meastypes)
+        except (WithingsAuthenticationFailedError, WithingsUnauthorizedError) as err:
+            raise SyncAuthError(f"Withings rejected the access token: {err}") from err
+        except ConfigEntryAuthFailed as err:
+            # Newer Home Assistant: refresh token rejected (OAuth2TokenRequestReauthError)
             raise SyncAuthError(f"Withings token refresh failed: {err}") from err
-
-        # Withings rotates refresh tokens, so the new pair must be saved immediately
-        await self._update_entry_data({CONF_WITHINGS_TOKEN: new_token})
-        return new_token["access_token"]
+        except ClientResponseError as err:
+            # Older Home Assistant passes the token endpoint's error through as-is;
+            # application_credentials maps a rejected refresh token to HTTP 400.
+            if 400 <= err.status < 500 and err.status != 429:
+                raise SyncAuthError(f"Withings token refresh failed: {err}") from err
+            raise
 
     async def _garmin_login(self) -> garmin_api.Garmin:
         """Log in to Garmin from stored tokens, persisting refreshed tokens."""
