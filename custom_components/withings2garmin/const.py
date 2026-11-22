@@ -1,5 +1,6 @@
 """Constants for Withings to Garmin Sync integration."""
 
+from datetime import timedelta
 from typing import Final
 
 DOMAIN: Final = "withings2garmin"
@@ -13,11 +14,26 @@ WITHINGS_SCOPE: Final = "user.metrics"
 CONF_GARMIN_EMAIL: Final = "garmin_email"
 CONF_GARMIN_TOKENS: Final = "garmin_tokens"
 CONF_LAST_SYNC: Final = "last_sync"
+# The callback URL last subscribed with Withings, so it can be revoked if the
+# URL changes (e.g. switching between Nabu Casa and an external URL). The
+# webhook id itself is stored under Home Assistant's CONF_WEBHOOK_ID.
+CONF_WEBHOOK_URL: Final = "webhook_url"
 
 # Options
-CONF_SYNC_INTERVAL: Final = "sync_interval"
 CONF_FEATURES: Final = "features"
-DEFAULT_SYNC_INTERVAL: Final = 60  # minutes, 0 disables scheduled sync
+
+# Withings notifications
+# If no notification arrives for this long, run a fallback sync and check the
+# subscription is still registered with Withings.
+WEBHOOK_WATCHDOG: Final = timedelta(hours=24)
+# Notifications that arrive close together (e.g. weight + blood pressure from
+# one measurement) are coalesced into a single sync.
+WEBHOOK_SYNC_DELAY: Final = 10  # seconds
+# Withings probes the callback URL on every subscribe call and fails if they
+# arrive too quickly.
+WEBHOOK_SUBSCRIBE_DELAY: Final = 5  # seconds
+# Retry delay when subscribing fails for a transient reason.
+WEBHOOK_RETRY_DELAY: Final = timedelta(minutes=30)
 
 # Service
 SERVICE_SYNC: Final = "sync"

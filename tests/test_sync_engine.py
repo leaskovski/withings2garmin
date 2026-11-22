@@ -42,7 +42,7 @@ def _group(group_id, taken, updated, values, category=REAL):
     )
 
 
-def _engine(groups=None, side_effect=None, last_sync=1700000000):
+def _engine(groups=None, side_effect=None, last_sync=1700000000, heights=()):
     entry = SimpleNamespace(
         data={"garmin_tokens": "tok", CONF_LAST_SYNC: last_sync},
         async_start_reauth=MagicMock(),
@@ -59,7 +59,15 @@ def _engine(groups=None, side_effect=None, last_sync=1700000000):
         config_entries=SimpleNamespace(async_update_entry=_update_entry),
     )
     withings = MagicMock()
-    withings.get_measurement_since = AsyncMock(return_value=groups, side_effect=side_effect)
+
+    async def _get_measurement_since(since, meastypes):
+        if side_effect is not None:
+            raise side_effect
+        if meastypes == [T.HEIGHT]:
+            return list(heights)
+        return groups
+
+    withings.get_measurement_since = AsyncMock(side_effect=_get_measurement_since)
     return sync_engine.WithingsGarminSync(hass, entry, withings), entry, withings
 
 
@@ -83,8 +91,45 @@ def test_uploads_real_groups_and_advances_watermark():
     # uploaded oldest-modified first
     assert [c.args[1].weight for c in add_body.call_args_list] == [72.0, 71.0]
     assert entry.data[CONF_LAST_SYNC] == 1710000600
-    since = withings.get_measurement_since.call_args.args[0]
+    since = withings.get_measurement_since.call_args_list[0].args[0]
     assert since == _ts(1700000001)
+
+
+def test_bmi_uses_height_in_effect_at_weigh_in():
+    groups = [
+        _group(1, 1710000000, 1710000100, {T.WEIGHT: 80.0}),
+        _group(2, 1720000000, 1720000100, {T.WEIGHT: 80.0}),
+    ]
+    heights = [
+        _group(10, 1600000000, 1600000000, {T.HEIGHT: 1.80}),
+        _group(11, 1715000000, 1715000000, {T.HEIGHT: 2.00}),
+        _group(12, 1716000000, 1716000000, {T.HEIGHT: 1.50}, category=OBJECTIVE),
+    ]
+    engine, _, withings = _engine(groups, heights=heights)
+
+    with (
+        patch.object(sync_engine.garmin_api, "login_with_tokens", return_value=(MagicMock(), "tok")),
+        patch.object(sync_engine.garmin_api, "add_body_composition") as add_body,
+    ):
+        result = asyncio.run(engine.async_sync(["WEIGHT"]))
+
+    assert result["success"], result
+    assert [c.args[1].bmi for c in add_body.call_args_list] == [24.7, 20.0]
+    height_call = withings.get_measurement_since.call_args_list[1]
+    assert height_call.args == (_ts(0), [T.HEIGHT])
+
+
+def test_no_height_still_uploads_without_bmi():
+    engine, _, _ = _engine([_group(1, 1710000000, 1710000100, {T.WEIGHT: 80.0})])
+
+    with (
+        patch.object(sync_engine.garmin_api, "login_with_tokens", return_value=(MagicMock(), "tok")),
+        patch.object(sync_engine.garmin_api, "add_body_composition") as add_body,
+    ):
+        result = asyncio.run(engine.async_sync(["WEIGHT"]))
+
+    assert result["synced_weight"] == 1
+    assert add_body.call_args.args[1].bmi is None
 
 
 def test_withings_auth_error_starts_reauth():

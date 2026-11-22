@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,6 +36,8 @@ from .const import (
 from .measurements import (
     BLOOD_PRESSURE_TYPES,
     BODY_COMPOSITION_TYPES,
+    height_at,
+    heights_from_groups,
     to_blood_pressure,
     to_body_composition,
 )
@@ -43,6 +47,27 @@ _LOGGER = logging.getLogger(__name__)
 
 class SyncAuthError(Exception):
     """Credentials for one of the services are no longer valid."""
+
+
+@contextmanager
+def translate_withings_auth_errors() -> Iterator[None]:
+    """Turn the ways an aiowithings call reports bad credentials into SyncAuthError.
+
+    Token refresh happens inside aiowithings, so these can surface from any call.
+    """
+    try:
+        yield
+    except (WithingsAuthenticationFailedError, WithingsUnauthorizedError) as err:
+        raise SyncAuthError(f"Withings rejected the access token: {err}") from err
+    except ConfigEntryAuthFailed as err:
+        # Newer Home Assistant: refresh token rejected (OAuth2TokenRequestReauthError)
+        raise SyncAuthError(f"Withings token refresh failed: {err}") from err
+    except ClientResponseError as err:
+        # Older Home Assistant passes the token endpoint's error through as-is;
+        # application_credentials maps a rejected refresh token to HTTP 400.
+        if 400 <= err.status < 500 and err.status != 429:
+            raise SyncAuthError(f"Withings token refresh failed: {err}") from err
+        raise
 
 
 class WithingsGarminSync:
@@ -116,6 +141,20 @@ class WithingsGarminSync:
             result["message"] = "No new data to sync"
             return
 
+        # Height is not part of a weigh-in; Withings stores it as its own
+        # (rarely updated) measurement, so fetch its full history for BMI.
+        heights: list[tuple[datetime, float]] = []
+        if sync_weight:
+            heights = heights_from_groups(
+                g
+                for g in await self._fetch_groups(
+                    datetime.fromtimestamp(0, tz=UTC), [MeasurementType.HEIGHT]
+                )
+                if g.category == MeasurementGroupCategory.REAL
+            )
+            if not heights:
+                _LOGGER.warning("No height recorded in Withings; BMI will not be synced")
+
         client = await self._garmin_login()
 
         watermark: int | None = None
@@ -123,7 +162,9 @@ class WithingsGarminSync:
         try:
             for group in groups:
                 try:
-                    await self._upload_group(client, group, sync_weight, sync_bp, result)
+                    await self._upload_group(
+                        client, group, sync_weight, sync_bp, heights, result
+                    )
                 except garmin_api.GarminConnectAuthenticationError as err:
                     raise SyncAuthError(f"Garmin rejected the session: {err}") from err
                 except Exception as err:  # noqa: BLE001
@@ -155,11 +196,14 @@ class WithingsGarminSync:
         group: MeasurementGroup,
         sync_weight: bool,
         sync_bp: bool,
+        heights: list[tuple[datetime, float]],
         result: dict[str, Any],
     ) -> None:
         timestamp = dt_util.as_local(group.taken_at).isoformat()
 
-        if sync_weight and (body := to_body_composition(group)) is not None:
+        if sync_weight and (
+            body := to_body_composition(group, height_at(heights, group.taken_at))
+        ) is not None:
             await self.hass.async_add_executor_job(
                 garmin_api.add_body_composition, client, body, timestamp
             )
@@ -179,19 +223,8 @@ class WithingsGarminSync:
         self, since: datetime, meastypes: list[MeasurementType]
     ) -> list[MeasurementGroup]:
         """Fetch measure groups; token refresh happens inside aiowithings."""
-        try:
+        with translate_withings_auth_errors():
             return await self.withings.get_measurement_since(since, meastypes)
-        except (WithingsAuthenticationFailedError, WithingsUnauthorizedError) as err:
-            raise SyncAuthError(f"Withings rejected the access token: {err}") from err
-        except ConfigEntryAuthFailed as err:
-            # Newer Home Assistant: refresh token rejected (OAuth2TokenRequestReauthError)
-            raise SyncAuthError(f"Withings token refresh failed: {err}") from err
-        except ClientResponseError as err:
-            # Older Home Assistant passes the token endpoint's error through as-is;
-            # application_credentials maps a rejected refresh token to HTTP 400.
-            if 400 <= err.status < 500 and err.status != 429:
-                raise SyncAuthError(f"Withings token refresh failed: {err}") from err
-            raise
 
     async def _garmin_login(self) -> garmin_api.Garmin:
         """Log in to Garmin from stored tokens, persisting refreshed tokens."""

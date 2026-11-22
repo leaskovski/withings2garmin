@@ -111,3 +111,33 @@ def test_invalid_pulse_is_dropped_not_fatal():
 def test_unknown_measurement_types_are_ignored():
     body = m.to_body_composition(_grp({T.WEIGHT: 70, T.UNKNOWN: 1}))
     assert body.weight == 70
+
+
+def test_bmi_from_height():
+    body = m.to_body_composition(_grp({T.WEIGHT: 72.35}), height_m=1.78)
+    assert body.bmi == round(72.35 / 1.78**2, 1)  # 22.8
+
+
+def test_bmi_none_without_height():
+    assert m.to_body_composition(_grp({T.WEIGHT: 72.35})).bmi is None
+
+
+def test_height_in_same_group_takes_precedence():
+    body = m.to_body_composition(_grp({T.WEIGHT: 80, T.HEIGHT: 2.0}), height_m=1.5)
+    assert body.bmi == 20.0
+
+
+def test_height_at_picks_reading_in_effect():
+    t = lambda s: datetime.fromtimestamp(s, tz=timezone.utc)
+    heights = m.heights_from_groups(
+        [
+            SimpleNamespace(taken_at=t(300), measurements=[SimpleNamespace(measurement_type=T.HEIGHT, value=1.9)]),
+            SimpleNamespace(taken_at=t(100), measurements=[SimpleNamespace(measurement_type=T.HEIGHT, value=1.8)]),
+            SimpleNamespace(taken_at=t(200), measurements=[SimpleNamespace(measurement_type=T.HEIGHT, value=18.0)]),  # implausible
+        ]
+    )
+    assert [h for _, h in heights] == [1.8, 1.9]
+    assert m.height_at(heights, t(50)) == 1.8  # before first reading: earliest
+    assert m.height_at(heights, t(250)) == 1.8
+    assert m.height_at(heights, t(300)) == 1.9
+    assert m.height_at([], t(300)) is None

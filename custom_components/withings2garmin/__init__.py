@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from dataclasses import dataclass
 from typing import Any
 
 import voluptuous as vol
 from aiowithings import WithingsClient
 
+from homeassistant.components.webhook import async_generate_id as webhook_generate_id
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.const import CONF_ACCESS_TOKEN
+from homeassistant.const import CONF_ACCESS_TOKEN, CONF_WEBHOOK_ID
 from homeassistant.core import (
     HomeAssistant,
     ServiceCall,
@@ -25,7 +26,6 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
     OAuth2Session,
     async_get_config_entry_implementation,
 )
-from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -33,19 +33,27 @@ from .const import (
     ATTR_CONFIG_ENTRY_ID,
     ATTR_FEATURES,
     CONF_FEATURES,
-    CONF_SYNC_INTERVAL,
     DEFAULT_FEATURES,
-    DEFAULT_SYNC_INTERVAL,
     DOMAIN,
     SERVICE_SYNC,
 )
 from .sync_engine import WithingsGarminSync
+from .webhook import WithingsWebhookManager, cloud_component
 
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-type WithingsGarminConfigEntry = ConfigEntry[WithingsGarminSync]
+
+@dataclass(slots=True)
+class WithingsGarminData:
+    """Runtime data for a config entry."""
+
+    engine: WithingsGarminSync
+    webhook: WithingsWebhookManager
+
+
+type WithingsGarminConfigEntry = ConfigEntry[WithingsGarminData]
 
 
 def _normalize_features(value: Any) -> list[str]:
@@ -92,7 +100,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             features = call.data.get(ATTR_FEATURES) or entry.options.get(
                 CONF_FEATURES, DEFAULT_FEATURES
             )
-            result = await entry.runtime_data.async_sync(features)
+            result = await entry.runtime_data.engine.async_sync(features)
             results[entry.entry_id] = result
             if not result["success"]:
                 failures.append(f"{entry.title}: {result['message']}")
@@ -113,6 +121,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: WithingsGarminConfigEntry) -> bool:
     """Set up Withings to Garmin Sync from a config entry."""
+    if CONF_WEBHOOK_ID not in entry.data:
+        # Entries created before notifications were supported.
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_WEBHOOK_ID: webhook_generate_id()}
+        )
+
     implementation = await async_get_config_entry_implementation(hass, entry)
     oauth_session = OAuth2Session(hass, entry, implementation)
     refresh_lock = asyncio.Lock()
@@ -128,28 +142,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: WithingsGarminConfigEntr
     withings.refresh_token_function = _refresh_token
 
     engine = WithingsGarminSync(hass, entry, withings)
-    entry.runtime_data = engine
+    manager = WithingsWebhookManager(hass, entry, withings, engine)
+    entry.runtime_data = WithingsGarminData(engine=engine, webhook=manager)
+    await manager.async_start()
 
-    interval = int(entry.options.get(CONF_SYNC_INTERVAL, DEFAULT_SYNC_INTERVAL))
-    if interval > 0:
-
-        async def _scheduled_sync(_now: datetime) -> None:
-            features = entry.options.get(CONF_FEATURES, DEFAULT_FEATURES)
-            result = await engine.async_sync(features)
-            _LOGGER.debug("Scheduled sync result: %s", result)
-
-        entry.async_on_unload(
-            async_track_time_interval(
-                hass,
-                _scheduled_sync,
-                timedelta(minutes=interval),
-                name="withings2garmin scheduled sync",
-                cancel_on_shutdown=True,
-            )
-        )
-
-    # Only reload when options change; data updates (token refreshes, last_sync)
-    # also fire update listeners and must not cause a reload.
+    # Only reload when options change; data updates (token refreshes, last_sync,
+    # webhook URL) also fire update listeners and must not cause a reload.
     loaded_options = dict(entry.options)
 
     async def _update_listener(hass: HomeAssistant, updated: ConfigEntry) -> None:
@@ -162,7 +160,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: WithingsGarminConfigEntr
 
 async def async_unload_entry(hass: HomeAssistant, entry: WithingsGarminConfigEntry) -> bool:
     """Unload a config entry."""
+    await entry.runtime_data.webhook.async_stop()
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete the Nabu Casa cloudhook when the entry is removed."""
+    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    cloud = cloud_component()
+    if webhook_id and cloud.async_active_subscription(hass):
+        try:
+            await cloud.async_delete_cloudhook(hass, webhook_id)
+        except (cloud.CloudNotAvailable, ValueError):
+            pass
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
